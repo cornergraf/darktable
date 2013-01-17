@@ -1,4 +1,14 @@
 # from art.gnome.org: marble-look, adjusted
+
+style "dt-stars"
+{
+  bg[NORMAL]   = "#e69926" # yellow stars
+  fg[NORMAL]   = "#FFe64c" # yellow stars
+  #bg[NORMAL]   = "#222222" # gray stars
+  #fg[NORMAL]   = "#050505" # gray stars
+}
+widget "dt-stars" style "dt-stars"
+
 style "clearlooks-default"
 {
 

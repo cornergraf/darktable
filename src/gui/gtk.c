@@ -747,7 +747,15 @@ dt_gui_gtk_init(dt_gui_gtk_t *gui, int argc, char *argv[])
 
   if(g_file_test(gtkrc, G_FILE_TEST_EXISTS))
     gtk_rc_parse (gtkrc);
-
+  
+  GtkStyle *style = gtk_rc_get_style_by_paths(gtk_settings_get_default(), "dt-stars", NULL, GTK_TYPE_NONE); 
+  darktable.gui->star_color_outline[0] = (1.0/ 65535) * style->fg[GTK_STATE_NORMAL].red;
+  darktable.gui->star_color_outline[1] = (1.0/ 65535) * style->fg[GTK_STATE_NORMAL].green;
+  darktable.gui->star_color_outline[2] = (1.0/ 65535) * style->fg[GTK_STATE_NORMAL].blue;
+  darktable.gui->star_color_fill[0] = (1.0/ 65535) * style->bg[GTK_STATE_NORMAL].red;
+  darktable.gui->star_color_fill[1] = (1.0/ 65535) * style->bg[GTK_STATE_NORMAL].green;
+  darktable.gui->star_color_fill[2] = (1.0/ 65535) * style->bg[GTK_STATE_NORMAL].blue;
+  
   // Initializing the shortcut groups
   darktable.control->accelerators = gtk_accel_group_new();
 
