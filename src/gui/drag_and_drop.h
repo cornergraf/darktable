@@ -16,12 +16,11 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#ifndef DARKTABLE_DRAG_AND_DROP_H
-#define DARKTABLE_DRAG_AND_DROP_H
+#pragma once
 
-#define _BYTE   8
-#define _WORD   16
-#define _DWORD  32
+#define _BYTE 8
+#define _WORD 16
+#define _DWORD 32
 
 /* common for all the drag&drop sources/destinations */
 enum
@@ -31,29 +30,18 @@ enum
 };
 
 /* drag & drop for internal image ids */
-static const GtkTargetEntry target_list_internal[] =
-{
-  { "image-id",    0, DND_TARGET_IMGID }
-};
-static const guint n_targets_internal = G_N_ELEMENTS (target_list_internal);
+static const GtkTargetEntry target_list_internal[] = { { "image-id", 0, DND_TARGET_IMGID } };
+static const guint n_targets_internal = G_N_ELEMENTS(target_list_internal);
 
 /* drag & drop for global uris */
-static const GtkTargetEntry target_list_external[] =
-{
-  { "text/uri-list", 0, DND_TARGET_URI }
-};
-static const guint n_targets_external = G_N_ELEMENTS (target_list_external);
+static const GtkTargetEntry target_list_external[] = { { "text/uri-list", 0, DND_TARGET_URI } };
+static const guint n_targets_external = G_N_ELEMENTS(target_list_external);
 
 /* drag & drop for both internal image ids and global uris */
-static const GtkTargetEntry target_list_all[] =
-{
-  { "image-id",                            0, DND_TARGET_IMGID },
-  { "text/uri-list",                       0, DND_TARGET_URI }
-};
-static const guint n_targets_all = G_N_ELEMENTS (target_list_all);
-
-#endif
+static const GtkTargetEntry target_list_all[]
+    = { { "image-id", 0, DND_TARGET_IMGID }, { "text/uri-list", 0, DND_TARGET_URI } };
+static const guint n_targets_all = G_N_ELEMENTS(target_list_all);
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
-// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

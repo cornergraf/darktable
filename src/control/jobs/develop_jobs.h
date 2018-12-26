@@ -15,31 +15,22 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
-#ifndef DT_CONTROL_JOBS_DEVELOP_H
-#define DT_CONTROL_JOBS_DEVELOP_H
+
+#pragma once
 
 #include "control/control.h"
 #include "develop/develop.h"
 
 #include <inttypes.h>
 
-typedef struct dt_dev_process_t
-{
-  dt_develop_t *dev;
-}
-dt_dev_process_t;
-
 /** process preview */
-int32_t dt_dev_process_preview_job_run(dt_job_t *job);
-void dt_dev_process_preview_job_init(dt_job_t *job, dt_develop_t *dev);
+dt_job_t *dt_dev_process_preview_job_create(dt_develop_t *dev);
 
 /** process image */
-int32_t dt_dev_process_image_job_run(dt_job_t *job);
-void dt_dev_process_image_job_init(dt_job_t *job, dt_develop_t *dev);
+dt_job_t *dt_dev_process_image_job_create(dt_develop_t *dev);
 
-void dt_dev_export_init(dt_job_t *job);
+dt_job_t *dt_dev_export_create();
 
-#endif
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
-// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

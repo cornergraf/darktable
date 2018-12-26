@@ -15,6 +15,9 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
+
+#ifdef HAVE_OPENCL
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,16 +27,6 @@
 #endif
 
 #include "common/dynload.h"
-
-
-static char *_strdup(const char *str)
-{
-  const int len = strlen(str)+1;
-  char *ptr = malloc(len);
-  if(ptr == NULL) return NULL;
-  strncpy(ptr, str, len);
-  return ptr;
-}
 
 
 /* check if gmodules is supported on this platform */
@@ -50,32 +43,34 @@ dt_gmodule_t *dt_gmodule_open(const char *library)
 {
   dt_gmodule_t *module = NULL;
   GModule *gmodule;
-  const char *name;
+  char *name;
 
-  if (strchr(library, '/') == NULL)
+  if(strchr(library, '/') == NULL)
   {
     name = g_module_build_path(NULL, library);
   }
   else
   {
-    name = library;
+    name = g_strdup(library);
   }
 
-  gmodule = g_module_open(name, G_MODULE_BIND_LAZY);
+  gmodule = g_module_open(name, G_MODULE_BIND_LAZY | G_MODULE_BIND_LOCAL);
 
-  if (gmodule != NULL)
+  if(gmodule != NULL)
   {
     module = (dt_gmodule_t *)malloc(sizeof(dt_gmodule_t));
     module->gmodule = gmodule;
-    module->library = _strdup(name);
+    module->library = name;
   }
+  else
+    g_free(name);
 
   return module;
 }
 
 
 /* get pointer to symbol */
-int dt_gmodule_symbol(dt_gmodule_t *module, const char *name, void (** pointer)(void))
+int dt_gmodule_symbol(dt_gmodule_t *module, const char *name, void (**pointer)(void))
 {
   int success = g_module_symbol(module->gmodule, name, (gpointer)pointer);
 
@@ -84,9 +79,9 @@ int dt_gmodule_symbol(dt_gmodule_t *module, const char *name, void (** pointer)(
 
 
 
-
+#endif
 
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
-// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

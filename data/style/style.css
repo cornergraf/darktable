@@ -57,6 +57,10 @@ body.navbody{
   width: 692px;
 }
 
+.dia img {
+  align-self: center;
+}
+
 .page div {
   height:250px;
   float:left;
@@ -79,6 +83,8 @@ body.navbody{
   display:table-cell;
   vertical-align:middle;
   text-align:center;
+  display: flex;
+  justify-content: center;
 }
 /* IE/Mac \*//*/
 * html .page a {
@@ -122,10 +128,4 @@ br{
 .text{
   line-height:12pt;
   margin-bottom:20pt;
-}
-
-.tags{
-  display: block;
-  margin-top: .7em;
-  font-style: italic;
 }

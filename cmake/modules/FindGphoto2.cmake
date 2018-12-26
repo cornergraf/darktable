@@ -1,9 +1,14 @@
 # - Find the native sqlite3 includes and library
 #
 # This module defines
-#  GPHOTO2_INCLUDE_DIR, where to find sqlite3.h, etc.
-#  GPHOTO2_LIBRARIES, the libraries to link against to use sqlite3.
-#  GPHOTO2_FOUND, If false, do not try to use sqlite3.
+#  GPHOTO2_INCLUDE_DIR, where to find libgphoto2 header files
+#  GPHOTO2_LIBRARIES, the libraries to link against to use libgphoto2
+#  GPHOTO2_FOUND, If false, do not try to use libgphoto2.
+#  GPHOTO2_VERSION_STRING, e.g. 2.4.14
+#  GPHOTO2_VERSION_MAJOR, e.g. 2
+#  GPHOTO2_VERSION_MINOR, e.g. 4
+#  GPHOTO2_VERSION_PATCH, e.g. 14
+#
 # also defined, but not for general use are
 #  GPHOTO2_LIBRARY, where to find the sqlite3 library.
 
@@ -11,6 +16,8 @@
 #=============================================================================
 # Copyright 2010 henrik andersson
 #=============================================================================
+
+include(LibFindMacros)
 
 SET(GPHOTO2_FIND_REQUIRED ${Gphoto2_FIND_REQUIRED})
 
@@ -23,6 +30,12 @@ find_library(GPHOTO2_LIBRARY NAMES ${GPHOTO2_NAMES} )
 find_library(GPHOTO2_PORT_LIBRARY NAMES ${GPHOTO2_PORT_NAMES} )
 mark_as_advanced(GPHOTO2_LIBRARY)
 mark_as_advanced(GPHOTO2_PORT_LIBRARY)
+
+# Detect libgphoto2 version
+libfind_pkg_check_modules(PC_GPHOTO2 libgphoto2)
+if(PC_GPHOTO2_FOUND)
+  set(GPHOTO2_VERSION_STRING "${PC_GPHOTO2_VERSION}")
+endif()
 
 # handle the QUIETLY and REQUIRED arguments and set GPHOTO2_FOUND to TRUE if
 # all listed variables are TRUE

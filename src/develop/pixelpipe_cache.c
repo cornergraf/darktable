@@ -17,6 +17,7 @@
 */
 
 #include "develop/pixelpipe_cache.h"
+#include "develop/format.h"
 #include "develop/pixelpipe_hb.h"
 #include "libs/lib.h"
 #include <stdlib.h>
@@ -31,23 +32,30 @@
 //   ping, pong, and priority buffer (focused plugin)
 // - drop read by the time another is requested (with priority, drop that, or alternating ping and pong?)
 
-int dt_dev_pixelpipe_cache_init(dt_dev_pixelpipe_cache_t *cache, int entries, int size)
+int dt_dev_pixelpipe_cache_init(dt_dev_pixelpipe_cache_t *cache, int entries, size_t size)
 {
   cache->entries = entries;
-  cache->data = (void **)malloc(sizeof(void *)*entries);
-  cache->size = (size_t *)malloc(sizeof(size_t)*entries);
-  cache->hash = (uint64_t *)malloc(sizeof(uint64_t)*entries);
-  cache->used = (int32_t *)malloc(sizeof(int32_t)*entries);
-  memset(cache->data,0,sizeof(void *)*entries);
-  for(int k=0; k<entries; k++)
-  {
-    cache->data[k] = (void *)dt_alloc_align(16, size);
-    if(!cache->data[k])
-      goto alloc_memory_fail;
-    cache->size[k] = size;
+  cache->data = (void **)calloc(entries, sizeof(void *));
+  cache->size = (size_t *)calloc(entries, sizeof(size_t));
+  cache->dsc = (dt_iop_buffer_dsc_t *)calloc(entries, sizeof(dt_iop_buffer_dsc_t));
 #ifdef _DEBUG
-    memset(cache->data[k], 0x5d, size);
+  memset(cache->dsc, 0x2c, sizeof(dt_iop_buffer_dsc_t) * entries);
 #endif
+  cache->hash = (uint64_t *)calloc(entries, sizeof(uint64_t));
+  cache->used = (int32_t *)calloc(entries, sizeof(int32_t));
+  for(int k = 0; k < entries; k++)
+  {
+    cache->size[k] = size;
+    if(size)
+    { // allow 0 initial buffer size (yet unknown dimensions)
+      cache->data[k] = (void *)dt_alloc_align(16, size);
+      if(!cache->data[k]) goto alloc_memory_fail;
+#ifdef _DEBUG
+      memset(cache->data[k], 0x5d, size);
+#endif
+      ASAN_POISON_MEMORY_REGION(cache->data[k], cache->size[k]);
+    }
+    else cache->data[k] = 0;
     cache->hash[k] = -1;
     cache->used[k] = 0;
   }
@@ -55,25 +63,15 @@ int dt_dev_pixelpipe_cache_init(dt_dev_pixelpipe_cache_t *cache, int entries, in
   return 1;
 
 alloc_memory_fail:
-  for(int k=0; k<entries; k++)
-  {
-    if(cache->data[k])
-      free(cache->data[k]);
-  }
-
-  free(cache->data);
-  free(cache->size);
-  free(cache->hash);
-  free(cache->used);
-
+  dt_dev_pixelpipe_cache_cleanup(cache);
   return 0;
-
 }
 
 void dt_dev_pixelpipe_cache_cleanup(dt_dev_pixelpipe_cache_t *cache)
 {
-  for(int k=0; k<cache->entries; k++) free(cache->data[k]);
+  for(int k = 0; k < cache->entries; k++) dt_free_align(cache->data[k]);
   free(cache->data);
+  free(cache->dsc);
   free(cache->hash);
   free(cache->used);
   free(cache->size);
@@ -85,24 +83,24 @@ uint64_t dt_dev_pixelpipe_cache_hash(int imgid, const dt_iop_roi_t *roi, dt_dev_
   uint64_t hash = 5381 + imgid;
   // go through all modules up to module and compute a weird hash using the operation and params.
   GList *pieces = pipe->nodes;
-  for(int k=0; k<module&&pieces; k++)
+  for(int k = 0; k < module && pieces; k++)
   {
     dt_dev_pixelpipe_iop_t *piece = (dt_dev_pixelpipe_iop_t *)pieces->data;
     dt_develop_t *dev = piece->module->dev;
-    if(!(dev->gui_module && (dev->gui_module->operation_tags_filter() &  piece->module->operation_tags())))
+    if(!(dev->gui_module && (dev->gui_module->operation_tags_filter() & piece->module->operation_tags())))
     {
       hash = ((hash << 5) + hash) ^ piece->hash;
-      if(piece->module->request_color_pick)
+      if(piece->module->request_color_pick != DT_REQUEST_COLORPICK_OFF)
       {
         if(darktable.lib->proxy.colorpicker.size)
         {
           const char *str = (const char *)piece->module->color_picker_box;
-          for(int i=0; i<sizeof(float)*4; i++) hash = ((hash << 5) + hash) ^ str[i];
+          for(size_t i = 0; i < sizeof(float) * 4; i++) hash = ((hash << 5) + hash) ^ str[i];
         }
         else
         {
           const char *str = (const char *)piece->module->color_picker_point;
-          for(int i=0; i<sizeof(float)*2; i++) hash = ((hash << 5) + hash) ^ str[i];
+          for(size_t i = 0; i < sizeof(float) * 2; i++) hash = ((hash << 5) + hash) ^ str[i];
         }
       }
     }
@@ -110,34 +108,38 @@ uint64_t dt_dev_pixelpipe_cache_hash(int imgid, const dt_iop_roi_t *roi, dt_dev_
   }
   // also add scale, x and y:
   const char *str = (const char *)roi;
-  for(int i=0; i<sizeof(dt_iop_roi_t); i++) hash = ((hash << 5) + hash) ^ str[i];
+  for(size_t i = 0; i < sizeof(dt_iop_roi_t); i++) hash = ((hash << 5) + hash) ^ str[i];
   return hash;
 }
 
 int dt_dev_pixelpipe_cache_available(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash)
 {
   // search for hash in cache
-  for(int k=0; k<cache->entries; k++) if(cache->hash[k] == hash) return 1;
+  for(int32_t k = 0; k < cache->entries; k++)
+    if(cache->hash[k] == hash) return 1;
   return 0;
 }
 
-int dt_dev_pixelpipe_cache_get_important(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, const size_t size, void **data)
+int dt_dev_pixelpipe_cache_get_important(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, const size_t size,
+                                         void **data, dt_iop_buffer_dsc_t **dsc)
 {
-  return dt_dev_pixelpipe_cache_get_weighted(cache, hash, size, data, -cache->entries);
+  return dt_dev_pixelpipe_cache_get_weighted(cache, hash, size, data, dsc, -cache->entries);
 }
 
-int dt_dev_pixelpipe_cache_get(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, const size_t size, void **data)
+int dt_dev_pixelpipe_cache_get(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, const size_t size,
+                               void **data, dt_iop_buffer_dsc_t **dsc)
 {
-  return dt_dev_pixelpipe_cache_get_weighted(cache, hash, size, data, 0);
+  return dt_dev_pixelpipe_cache_get_weighted(cache, hash, size, data, dsc, 0);
 }
 
-int dt_dev_pixelpipe_cache_get_weighted(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, const size_t size, void **data, int weight)
+int dt_dev_pixelpipe_cache_get_weighted(dt_dev_pixelpipe_cache_t *cache, const uint64_t hash, const size_t size,
+                                        void **data, dt_iop_buffer_dsc_t **dsc, int weight)
 {
-  cache->queries ++;
+  cache->queries++;
   *data = NULL;
   int max_used = -1, max = 0;
   size_t sz = 0;
-  for(int k=0; k<cache->entries; k++)
+  for(int k = 0; k < cache->entries; k++)
   {
     // search for hash in cache
     if(cache->used[k] > max_used)
@@ -148,43 +150,61 @@ int dt_dev_pixelpipe_cache_get_weighted(dt_dev_pixelpipe_cache_t *cache, const u
     cache->used[k]++; // age all entries
     if(cache->hash[k] == hash)
     {
+      assert(cache->size[k] >= size);
+
       *data = cache->data[k];
+      *dsc = &cache->dsc[k];
       sz = cache->size[k];
       cache->used[k] = weight; // this is the MRU entry
+
+      ASAN_POISON_MEMORY_REGION(*data, sz);
+      ASAN_UNPOISON_MEMORY_REGION(*data, size);
     }
   }
 
   if(!*data || sz < size)
   {
     // kill LRU entry
-    // printf("[pixelpipe_cache_get] hash not found, returning slot %d/%d age %d\n", max, cache->entries, weight);
+    // printf("[pixelpipe_cache_get] hash not found, returning slot %d/%d age %d\n", max, cache->entries,
+    // weight);
     if(cache->size[max] < size)
     {
-      free(cache->data[max]);
+      dt_free_align(cache->data[max]);
       cache->data[max] = (void *)dt_alloc_align(16, size);
       cache->size[max] = size;
     }
     *data = cache->data[max];
+    sz = cache->size[max];
+
+    ASAN_POISON_MEMORY_REGION(*data, sz);
+    ASAN_UNPOISON_MEMORY_REGION(*data, size);
+
+    // first, update our copy, then update the pointer to point at our copy
+    cache->dsc[max] = **dsc;
+    *dsc = &cache->dsc[max];
+
     cache->hash[max] = hash;
     cache->used[max] = weight;
     cache->misses++;
     return 1;
   }
-  else return 0;
+  else
+    return 0;
 }
 
 void dt_dev_pixelpipe_cache_flush(dt_dev_pixelpipe_cache_t *cache)
 {
-  for(int k=0; k<cache->entries; k++)
+  for(int k = 0; k < cache->entries; k++)
   {
     cache->hash[k] = -1;
     cache->used[k] = 0;
+    ASAN_POISON_MEMORY_REGION(cache->data[k], cache->size[k]);
   }
 }
 
 void dt_dev_pixelpipe_cache_reweight(dt_dev_pixelpipe_cache_t *cache, void *data)
 {
-  for(int k=0; k<cache->entries; k++)
+  for(int k = 0; k < cache->entries; k++)
   {
     if(cache->data[k] == data)
     {
@@ -195,26 +215,27 @@ void dt_dev_pixelpipe_cache_reweight(dt_dev_pixelpipe_cache_t *cache, void *data
 
 void dt_dev_pixelpipe_cache_invalidate(dt_dev_pixelpipe_cache_t *cache, void *data)
 {
-  for(int k=0; k<cache->entries; k++)
+  for(int k = 0; k < cache->entries; k++)
   {
     if(cache->data[k] == data)
     {
       cache->hash[k] = -1;
+      ASAN_POISON_MEMORY_REGION(cache->data[k], cache->size[k]);
     }
   }
 }
 
 void dt_dev_pixelpipe_cache_print(dt_dev_pixelpipe_cache_t *cache)
 {
-  for(int k=0; k<cache->entries; k++)
+  for(int k = 0; k < cache->entries; k++)
   {
     printf("pixelpipe cacheline %d ", k);
-    printf("used %d by %"PRIu64"", cache->used[k], cache->hash[k]);
+    printf("used %d by %" PRIu64 "", cache->used[k], cache->hash[k]);
     printf("\n");
   }
-  printf("cache hit rate so far: %.3f\n", (cache->queries - cache->misses)/(float)cache->queries);
+  printf("cache hit rate so far: %.3f\n", (cache->queries - cache->misses) / (float)cache->queries);
 }
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
-// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

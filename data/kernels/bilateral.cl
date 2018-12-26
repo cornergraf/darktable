@@ -209,8 +209,8 @@ blur_line_z(
   const int j = get_global_id(1);
   if(k >= size1 || j >= size2) return;
 
-  const float w1 = 4.f/16.f;
-  const float w2 = 2.f/16.f;
+  const float w1 = 4.0f/16.0f;
+  const float w2 = 2.0f/16.0f;
 
   int index = k*offset1 + j*offset2;
 
@@ -251,9 +251,9 @@ blur_line(
   const int j = get_global_id(1);
   if(k >= size1 || j >= size2) return;
 
-  const float w0 = 6.f/16.f;
-  const float w1 = 4.f/16.f;
-  const float w2 = 1.f/16.f;
+  const float w0 = 6.0f/16.0f;
+  const float w1 = 4.0f/16.0f;
+  const float w2 = 1.0f/16.0f;
   int index = k*offset1 + j*offset2;
 
   float tmp1 = ibuf[index];
@@ -281,8 +281,8 @@ blur_line(
 kernel void
 slice_to_output(
     read_only  image2d_t in,
+    read_only  image2d_t target,
     write_only image2d_t out,
-    read_only  image2d_t out2,  // alias.
     global float        *grid,
     const int            width,
     const int            height,
@@ -307,7 +307,7 @@ slice_to_output(
   float4 sigma = (float4)(sigma_s, sigma_s, sigma_r, 0);
 
   float4 pixel  = read_imagef (in,   samplerc, (int2)(x, y));
-  float4 pixel2 = read_imagef (out2, samplerc, (int2)(x, y));
+  float4 pixel2 = read_imagef (target, samplerc, (int2)(x, y));
   float L = pixel.x;
   float4 p = (float4)(x, y, L, 0);
   float4 gridp = image_to_grid(p, size, sigma);

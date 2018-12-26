@@ -12,10 +12,10 @@
 #
 NOTIFICATION_LINE='// modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh'
 VIM_MODELINE='// vim: shiftwidth=2 expandtab tabstop=2 cindent'
-KATE_MODELINE='// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;'
+KATE_MODELINE='// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;'
 
 # thank you for collecting these files in tools/beautify_style.sh
-SOURCES=$(find src/ -name "*.c" -or -name "*.cc" -or -name "*.h" | grep -v src/external | grep -v gegl-operations)
+SOURCES=$(find src/ -name "*.c" -or -name "*.cc" -or -name "*.h" | grep -v src/external)
 
 for f in $SOURCES
 do
@@ -23,7 +23,7 @@ do
   #  echo Current file is "$f"
   #  echo " removing any old modelines"
 
-  TEMPFILE=`tempfile`
+  TEMPFILE=$(tempfile)
   # Check for lines beginning with a comment and a modeline keyword
   grep -v "^// vim:\|^// kate:\|^// modelines:" "$f" > "$TEMPFILE"
 
@@ -40,4 +40,4 @@ do
 done
 
 # vim: et sw=2 ts=2 list listchars=trail\:·,eol\:¶,tab\:->,extends\:»,precedes\:«
-# kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+# kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

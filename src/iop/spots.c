@@ -18,63 +18,37 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include "develop/imageop.h"
-#include "control/control.h"
 #include "control/conf.h"
+#include "control/control.h"
+#include "develop/blend.h"
+#include "develop/imageop.h"
+#include "develop/masks.h"
+#include "gui/accelerators.h"
 #include "gui/gtk.h"
+#include "iop/iop_api.h"
+#include "common/iop_group.h"
 #include <gtk/gtk.h>
 #include <stdlib.h>
 
-#define EPSILON -0.00001
 
 // this is the version of the modules parameters,
 // and includes version information about compile-time dt
-DT_MODULE(1)
-
-typedef struct spot_t
-{
-  // position of the spot
-  float x, y;
-  // position to clone from
-  float xc, yc;
-  float radius;
-}
-spot_t;
+DT_MODULE_INTROSPECTION(2, dt_iop_spots_params_t)
 
 typedef struct dt_iop_spots_params_t
 {
-  int num_spots;
-  spot_t spot[32];
-}
-dt_iop_spots_params_t;
-
-typedef struct spot_draw_t
-{
-  //for both source and spot, first point is the center
-  // points to draw the source
-  float *source;
-  // points to draw the spot
-  float *spot;
-  //how many points in the buffers ? (including centers)
-  int pts_count;
-  //is the buffers allocated ? 
-  int ok;
-}
-spot_draw_t;
+  int clone_id[64];
+  int clone_algo[64];
+} dt_iop_spots_params_t;
 
 typedef struct dt_iop_spots_gui_data_t
 {
   GtkLabel *label;
-  int dragging;
-  int selected;
-  gboolean hoover_c; // is the pointer over the "clone from" end?
-  float last_radius;
-  spot_draw_t spot[32];
-  uint64_t pipe_hash;
-}
-dt_iop_spots_gui_data_t;
+  GtkWidget *bt_path, *bt_circle, *bt_ellipse;
+} dt_iop_spots_gui_data_t;
 
 typedef struct dt_iop_spots_params_t dt_iop_spots_data_t;
+
 
 // this returns a translatable name
 const char *name()
@@ -82,289 +56,477 @@ const char *name()
   return _("spot removal");
 }
 
-int
-groups ()
+int groups()
 {
-  return IOP_GROUP_CORRECT;
+  return dt_iop_get_group("spot removal", IOP_GROUP_CORRECT);
 }
 
-static void gui_spot_add(dt_iop_module_t *self, spot_draw_t *gspt, int spot_index)
+int flags()
 {
-  dt_develop_t *dev = self->dev;
-  dt_iop_spots_params_t   *p = (dt_iop_spots_params_t   *)self->params;
-  float wd = dev->preview_pipe->iwidth;
-  float ht = dev->preview_pipe->iheight;
-
-  //how many points do we need ?
-  float r = p->spot[spot_index].radius*MIN(wd, ht);
-  int l = (int) (2.0*M_PI*r);
-  
-  //buffer allocations
-  gspt->source = malloc(2*(l+1)*sizeof(float));
-  gspt->spot = malloc(2*(l+1)*sizeof(float));
-  gspt->pts_count = l+1;
-  
-  
-  //now we set the points
-  gspt->source[0] = p->spot[spot_index].xc*wd;
-  gspt->source[1] = p->spot[spot_index].yc*ht;
-  gspt->spot[0] = p->spot[spot_index].x*wd;
-  gspt->spot[1] = p->spot[spot_index].y*ht;
-  for (int i=1; i<l+1; i++)
-  {
-    float alpha = (i-1)*2.0*M_PI/(float) l;
-    gspt->source[i*2] = p->spot[spot_index].xc*wd + r*cosf(alpha);
-    gspt->source[i*2+1] = p->spot[spot_index].yc*ht + r*sinf(alpha);
-    gspt->spot[i*2] = p->spot[spot_index].x*wd + r*cosf(alpha);
-    gspt->spot[i*2+1] = p->spot[spot_index].y*ht + r*sinf(alpha);
-  }
-  
-  //and we do the transforms
-  if (dt_dev_distort_transform(dev,gspt->source,l+1) && dt_dev_distort_transform(dev,gspt->spot,l+1))
-  {  
-    gspt->ok = 1;
-    return;
-  }
-  
-  //if we have an error, we free the buffers
-  gspt->pts_count = 0;
-  free(gspt->source);
-  free(gspt->spot);
-}
-static void gui_spot_remove(dt_iop_module_t *self, spot_draw_t *gspt, int spot_index)
-{
-  gspt->pts_count = 0;
-  free(gspt->source);
-  gspt->source = NULL;
-  free(gspt->spot);
-  gspt->spot = NULL;
-  gspt->ok = 0;
-}
-static void gui_spot_update_source(dt_iop_module_t *self, spot_draw_t *gspt, int spot_index)
-{
-  //no need to re-allocate the buffer as there is no radius change
-  dt_develop_t *dev = self->dev;
-  dt_iop_spots_params_t   *p = (dt_iop_spots_params_t   *)self->params;
-  float wd = dev->preview_pipe->iwidth;
-  float ht = dev->preview_pipe->iheight;
-  
-  if (gspt->pts_count == 0) return;
-  
-  
-  //how many points do we need ?
-  float r = p->spot[spot_index].radius*MIN(wd, ht);
-  int l = gspt->pts_count -1;
-  
-  //now we set the points
-  gspt->source[0] = p->spot[spot_index].xc*wd;
-  gspt->source[1] = p->spot[spot_index].yc*ht;
-  for (int i=1; i<l+1; i++)
-  {
-    float alpha = (i-1)*2.0*M_PI/(float) l;
-    gspt->source[i*2] = p->spot[spot_index].xc*wd + r*cosf(alpha);
-    gspt->source[i*2+1] = p->spot[spot_index].yc*ht + r*sinf(alpha);
-  }
-  
-  //and we do the transforms
-  dt_dev_distort_transform(dev,gspt->source,l+1);
-}
-static void gui_spot_update_spot(dt_iop_module_t *self, spot_draw_t *gspt, int spot_index)
-{
-  //no need to re-allocate the buffer as there is no radius change
-  dt_develop_t *dev = self->dev;
-  dt_iop_spots_params_t   *p = (dt_iop_spots_params_t   *)self->params;
-  float wd = dev->preview_pipe->iwidth;
-  float ht = dev->preview_pipe->iheight;
-  
-  if (gspt->pts_count == 0) return;
-  
-  //how many points do we need ?
-  float r = p->spot[spot_index].radius*MIN(wd, ht);
-  int l = gspt->pts_count -1;
-  
-  //now we set the points
-  gspt->spot[0] = p->spot[spot_index].x*wd;
-  gspt->spot[1] = p->spot[spot_index].y*ht;
-  for (int i=1; i<l+1; i++)
-  {
-    float alpha = (i-1)*2.0*M_PI/(float) l;
-    gspt->spot[i*2] = p->spot[spot_index].x*wd + r*cosf(alpha);
-    gspt->spot[i*2+1] = p->spot[spot_index].y*ht + r*sinf(alpha);
-  }
-  
-  //and we do the transforms
-  dt_dev_distort_transform(dev,gspt->spot,l+1);
-}
-static void gui_spot_update_radius(dt_iop_module_t *self, spot_draw_t *gspt, int spot_index)
-{
-  if (gspt->pts_count == 0) return;
-  
-  //we remove and re-add the point
-  gui_spot_remove(self,gspt,spot_index);
-  gui_spot_add(self,gspt,spot_index);
+  return IOP_FLAGS_SUPPORTS_BLENDING | IOP_FLAGS_NO_MASKS;
 }
 
-static int gui_spot_test_create(dt_iop_module_t *self)
+int legacy_params(dt_iop_module_t *self, const void *const old_params, const int old_version,
+                  void *new_params, const int new_version)
 {
-  dt_iop_spots_params_t   *p = (dt_iop_spots_params_t   *)self->params;
-  dt_iop_spots_gui_data_t   *g = (dt_iop_spots_gui_data_t   *)self->gui_data;
-  
-  //we test if the image has changed
-  if (g->pipe_hash >= 0)
+  if(old_version == 1 && new_version == 2)
   {
-    if (g->pipe_hash != self->dev->preview_pipe->backbuf_hash)
+    typedef struct dt_iop_spots_v1_t
     {
-      for (int i=0; i<32; i++)
-        if (g->spot[i].ok) gui_spot_remove(self,&g->spot[i],i);
-      g->pipe_hash = 0;
-    }
-  }
-  
-  //we create the spots if needed
-  for(int i=0; i<p->num_spots; i++)
-  {
-    if (!g->spot[i].ok)
+      float x, y;
+      float xc, yc;
+      float radius;
+    } dt_iop_spots_v1_t;
+    typedef struct dt_iop_spots_params_v1_t
     {
-      gui_spot_add(self,&g->spot[i],i);
-      if (!g->spot[i].ok) return 0;
+      int num_spots;
+      dt_iop_spots_v1_t spot[32];
+    } dt_iop_spots_params_v1_t;
+
+    dt_iop_spots_params_v1_t *o = (dt_iop_spots_params_v1_t *)old_params;
+    dt_iop_spots_params_t *n = (dt_iop_spots_params_t *)new_params;
+    dt_iop_spots_params_t *d = (dt_iop_spots_params_t *)self->default_params;
+
+    *n = *d; // start with a fresh copy of default parameters
+    for(int i = 0; i < o->num_spots; i++)
+    {
+      // we have to register a new circle mask
+      dt_masks_form_t *form = dt_masks_create(DT_MASKS_CIRCLE | DT_MASKS_CLONE);
+
+      // spots v1 was before raw orientation changes
+      form->version = 1;
+
+      dt_masks_point_circle_t *circle = (dt_masks_point_circle_t *)(malloc(sizeof(dt_masks_point_circle_t)));
+      circle->center[0] = o->spot[i].x;
+      circle->center[1] = o->spot[i].y;
+      circle->radius = o->spot[i].radius;
+      circle->border = 0.0f;
+      form->points = g_list_append(form->points, circle);
+      form->source[0] = o->spot[i].xc;
+      form->source[1] = o->spot[i].yc;
+
+      // adapt for raw orientation changes
+      dt_masks_legacy_params(self->dev, form, form->version, dt_masks_version());
+
+      dt_masks_gui_form_save_creation(self->dev, self, form, NULL);
+
+      // and add it to the module params
+      n->clone_id[i] = form->formid;
+      n->clone_algo[i] = 1;
     }
+    return 0;
   }
-  g->pipe_hash = self->dev->preview_pipe->backbuf_hash;
   return 1;
 }
 
-void modify_roi_out(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece, dt_iop_roi_t *roi_out, const dt_iop_roi_t *roi_in)
+static void _resynch_params(struct dt_iop_module_t *self)
+{
+  dt_iop_spots_params_t *p = (dt_iop_spots_params_t *)self->params;
+  dt_develop_blend_params_t *bp = self->blend_params;
+
+  // we create 2 new buffers
+  int nid[64] = { 0 };
+  int nalgo[64] = { 2 };
+
+  // we go through all forms in blend params
+  dt_masks_form_t *grp = dt_masks_get_from_id(darktable.develop, bp->mask_id);
+  if(grp && (grp->type & DT_MASKS_GROUP))
+  {
+    GList *forms = g_list_first(grp->points);
+    int i = 0;
+    while((i < 64) && forms)
+    {
+      dt_masks_point_group_t *grpt = (dt_masks_point_group_t *)forms->data;
+      nid[i] = grpt->formid;
+      for(int j = 0; j < 64; j++)
+      {
+        if(p->clone_id[j] == nid[i])
+        {
+          nalgo[i] = p->clone_algo[j];
+          break;
+        }
+      }
+      i++;
+      forms = g_list_next(forms);
+    }
+  }
+
+  // we reaffect params
+  for(int i = 0; i < 64; i++)
+  {
+    p->clone_algo[i] = nalgo[i];
+    p->clone_id[i] = nid[i];
+  }
+}
+
+
+static void _reset_form_creation(GtkWidget *widget, dt_iop_module_t *self)
+{
+  dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *)self->gui_data;
+  if(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g->bt_path)) ||
+      gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g->bt_circle)) ||
+      gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g->bt_ellipse)))
+  {
+    // we unset the creation mode
+    dt_masks_change_form_gui(NULL);
+  }
+  if (widget != g->bt_path) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_path), FALSE);
+  if (widget != g->bt_circle) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_circle), FALSE);
+  if (widget != g->bt_ellipse) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_ellipse), FALSE);
+}
+
+static gboolean _add_path(GtkWidget *widget, GdkEventButton *e, dt_iop_module_t *self)
+{
+  _reset_form_creation(widget, self);
+  if(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget))) return FALSE;
+  // we want to be sure that the iop has focus
+  dt_iop_request_focus(self);
+  // we create the new form
+  dt_masks_form_t *form = dt_masks_create(DT_MASKS_PATH | DT_MASKS_CLONE);
+  dt_masks_change_form_gui(form);
+  darktable.develop->form_gui->creation = TRUE;
+  darktable.develop->form_gui->creation_module = self;
+  dt_control_queue_redraw_center();
+  return FALSE;
+}
+static gboolean _add_circle(GtkWidget *widget, GdkEventButton *e, dt_iop_module_t *self)
+{
+  _reset_form_creation(widget, self);
+  if(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget))) return FALSE;
+  // we want to be sure that the iop has focus
+  dt_iop_request_focus(self);
+  // we create the new form
+  dt_masks_form_t *spot = dt_masks_create(DT_MASKS_CIRCLE | DT_MASKS_CLONE);
+  dt_masks_change_form_gui(spot);
+  darktable.develop->form_gui->creation = TRUE;
+  darktable.develop->form_gui->creation_module = self;
+  dt_control_queue_redraw_center();
+  return FALSE;
+}
+static gboolean _add_ellipse(GtkWidget *widget, GdkEventButton *e, dt_iop_module_t *self)
+{
+  _reset_form_creation(widget, self);
+  if(gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(widget))) return FALSE;
+  // we want to be sure that the iop has focus
+  dt_iop_request_focus(self);
+  // we create the new form
+  dt_masks_form_t *spot = dt_masks_create(DT_MASKS_ELLIPSE | DT_MASKS_CLONE);
+  dt_masks_change_form_gui(spot);
+  darktable.develop->form_gui->creation = TRUE;
+  darktable.develop->form_gui->creation_module = self;
+  dt_control_queue_redraw_center();
+  return FALSE;
+}
+
+
+static gboolean masks_form_is_in_roi(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
+                                     dt_masks_form_t *form, const dt_iop_roi_t *roi_in,
+                                     const dt_iop_roi_t *roi_out)
+{
+  // we get the area for the form
+  int fl, ft, fw, fh;
+
+  if(!dt_masks_get_area(self, piece, form, &fw, &fh, &fl, &ft)) return FALSE;
+
+  // is the form outside of the roi?
+  fw *= roi_in->scale, fh *= roi_in->scale, fl *= roi_in->scale, ft *= roi_in->scale;
+  if(ft >= roi_out->y + roi_out->height || ft + fh <= roi_out->y || fl >= roi_out->x + roi_out->width
+     || fl + fw <= roi_out->x)
+    return FALSE;
+
+  return TRUE;
+}
+
+void modify_roi_out(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece, dt_iop_roi_t *roi_out,
+                    const dt_iop_roi_t *roi_in)
 {
   *roi_out = *roi_in;
 }
 
-void modify_roi_in(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece, const dt_iop_roi_t *roi_out, dt_iop_roi_t *roi_in)
+// needed if mask dest is in roi and mask src is not
+void modify_roi_in(struct dt_iop_module_t *self, struct dt_dev_pixelpipe_iop_t *piece,
+                   const dt_iop_roi_t *roi_out, dt_iop_roi_t *roi_in)
 {
   *roi_in = *roi_out;
-  
-  int roir = roi_in->width+roi_in->x;
-  int roib = roi_in->height+roi_in->y;
+
+  int roir = roi_in->width + roi_in->x;
+  int roib = roi_in->height + roi_in->y;
   int roix = roi_in->x;
   int roiy = roi_in->y;
-  
-  dt_iop_spots_params_t *d = (dt_iop_spots_params_t *)piece->data;
-  
-  //We calcul full image width and height at scale of ROI
-  const int imw = CLAMP(piece->pipe->iwidth*roi_in->scale, 1, piece->pipe->iwidth);
-  const int imh = CLAMP(piece->pipe->iheight*roi_in->scale, 1, piece->pipe->iheight);
-  
-  // We iterate throught all spots or polygons
-  for(int i=0; i<d->num_spots; i++)
+
+  // dt_iop_spots_params_t *d = (dt_iop_spots_params_t *)piece->data;
+  dt_develop_blend_params_t *bp = self->blend_params;
+
+  // We iterate through all spots or polygons
+  dt_masks_form_t *grp = dt_masks_get_from_id_ext(piece->pipe->forms, bp->mask_id);
+  if(grp && (grp->type & DT_MASKS_GROUP))
   {
-    // convert in full image space (at scale of ROI)
-    const int x = d->spot[i].x*imw, y = d->spot[i].y*imh;
-    const int xc = d->spot[i].xc*imw, yc = d->spot[i].yc*imh;
-    const int rad = d->spot[i].radius * MIN(imw, imh);
-    
-    int w,h,l,t;
-    l = x-rad;
-    t = y-rad;
-    w = h = 2*rad;
-    
-    //If the destination is outside the ROI, we skip this form !
-    if (t>=roi_out->y+roi_out->height || t+h<=roi_out->y || l>=roi_out->x+roi_out->width || l+w<=roi_out->x) continue;
-    
-    //we only process the visible part of the destination
-    if (t<=roi_out->y) h -= roi_out->y-t, t = roi_out->y;
-    if (t+h>=roi_out->height+roi_out->y) h = roi_out->y+roi_out->height-1-t;
-    if (l<=roi_out->x) w -= roi_out->x-l, l = roi_out->x;
-    if (l+w>=roi_out->width+roi_out->x) w = roi_out->x+roi_out->width-1-l;
-    
-    //we don't process part of the source outside the image
-    roiy = fminf(t+yc-y,roiy);
-    roix = fminf(l+xc-x,roix);
-    roir = fmaxf(l+w+xc-x,roir);
-    roib = fmaxf(t+h+yc-y,roib);
+    GList *forms = g_list_first(grp->points);
+    while(forms)
+    {
+      dt_masks_point_group_t *grpt = (dt_masks_point_group_t *)forms->data;
+      // we get the spot
+      dt_masks_form_t *form = dt_masks_get_from_id_ext(piece->pipe->forms, grpt->formid);
+      if(form)
+      {
+        // if the form is outside the roi, we just skip it
+        if(!masks_form_is_in_roi(self, piece, form, roi_in, roi_out))
+        {
+          forms = g_list_next(forms);
+          continue;
+        }
+
+        // we get the area for the source
+        int fl, ft, fw, fh;
+
+        if(!dt_masks_get_source_area(self, piece, form, &fw, &fh, &fl, &ft))
+        {
+          forms = g_list_next(forms);
+          continue;
+        }
+        fw *= roi_in->scale, fh *= roi_in->scale, fl *= roi_in->scale, ft *= roi_in->scale;
+
+        // we enlarge the roi if needed
+        roiy = fminf(ft, roiy);
+        roix = fminf(fl, roix);
+        roir = fmaxf(fl + fw, roir);
+        roib = fmaxf(ft + fh, roib);
+      }
+      forms = g_list_next(forms);
+    }
   }
-  
-  //now we set the values
-  roi_in->x = CLAMP(roix, 0, piece->pipe->iwidth-1);
-  roi_in->y = CLAMP(roiy, 0, piece->pipe->iheight-1);
-  roi_in->width = CLAMP(roir-roi_in->x, 1, piece->pipe->iwidth-roi_in->x);
-  roi_in->height = CLAMP(roib-roi_in->y, 1, piece->pipe->iheight-roi_in->y);
+
+  // now we set the values
+  const float scwidth = piece->buf_in.width * roi_in->scale, scheight = piece->buf_in.height * roi_in->scale;
+  roi_in->x = CLAMP(roix, 0, scwidth - 1);
+  roi_in->y = CLAMP(roiy, 0, scheight - 1);
+  roi_in->width = CLAMP(roir - roi_in->x, 1, scwidth + .5f - roi_in->x);
+  roi_in->height = CLAMP(roib - roi_in->y, 1, scheight + .5f - roi_in->y);
 }
 
-void process (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, void *i, void *o, const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out)
+static void masks_point_denormalize(dt_dev_pixelpipe_iop_t *piece, const dt_iop_roi_t *roi,
+                                    const float *points, size_t points_count, float *new)
+{
+  const float scalex = piece->pipe->iwidth * roi->scale, scaley = piece->pipe->iheight * roi->scale;
+
+  for(size_t i = 0; i < points_count * 2; i += 2)
+  {
+    new[i] = points[i] * scalex;
+    new[i + 1] = points[i + 1] * scaley;
+  }
+}
+
+static int masks_point_calc_delta(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
+                                  const dt_iop_roi_t *roi, const float *target, const float *source, int *dx,
+                                  int *dy)
+{
+  float points[4];
+  masks_point_denormalize(piece, roi, target, 1, points);
+  masks_point_denormalize(piece, roi, source, 1, points + 2);
+
+  int res = dt_dev_distort_transform_plus(self->dev, piece->pipe, 0, self->priority, points, 2);
+  if(!res) return res;
+
+  *dx = points[0] - points[2];
+  *dy = points[1] - points[3];
+
+  return res;
+}
+
+static int masks_get_delta(dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const dt_iop_roi_t *roi,
+                           dt_masks_form_t *form, int *dx, int *dy)
+{
+  int res = 0;
+
+  if(form->type & DT_MASKS_PATH)
+  {
+    dt_masks_point_path_t *pt = (dt_masks_point_path_t *)form->points->data;
+
+    res = masks_point_calc_delta(self, piece, roi, pt->corner, form->source, dx, dy);
+  }
+  else if(form->type & DT_MASKS_CIRCLE)
+  {
+    dt_masks_point_circle_t *pt = (dt_masks_point_circle_t *)form->points->data;
+
+    res = masks_point_calc_delta(self, piece, roi, pt->center, form->source, dx, dy);
+  }
+  else if(form->type & DT_MASKS_ELLIPSE)
+  {
+    dt_masks_point_ellipse_t *pt = (dt_masks_point_ellipse_t *)form->points->data;
+
+    res = masks_point_calc_delta(self, piece, roi, pt->center, form->source, dx, dy);
+  }
+
+  return res;
+}
+
+void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const i, void *const o,
+             const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
   dt_iop_spots_params_t *d = (dt_iop_spots_params_t *)piece->data;
-  // const float scale = piece->iscale/roi_in->scale;
-  const float scale = 1.0f/roi_in->scale;
+  dt_develop_blend_params_t *bp = self->blend_params;
+
   const int ch = piece->colors;
   const float *in = (float *)i;
   float *out = (float *)o;
-  
-  //We calcul full image width and height at scale of ROI
-  const int imw = CLAMP(piece->pipe->iwidth*roi_in->scale, 1, piece->pipe->iwidth);
-  const int imh = CLAMP(piece->pipe->iheight*roi_in->scale, 1, piece->pipe->iheight);
-  
-  // we don't modify most of the image:
+
+// we don't modify most of the image:
 #ifdef _OPENMP
-    #pragma omp parallel for schedule(static) default(none) shared(d,out,in,roi_in,roi_out)
+#pragma omp parallel for schedule(static) default(none) shared(out, in)
 #endif
-  for (int k=0; k<roi_out->height; k++)
+  for(int k = 0; k < roi_out->height; k++)
   {
-    float *outb = out + ch*k*roi_out->width;
-    const float *inb =  in + ch*roi_in->width*(k+roi_out->y-roi_in->y) + ch*(roi_out->x-roi_in->x);
-    memcpy(outb, inb, sizeof(float)*roi_out->width*ch);
+    float *outb = out + (size_t)ch * k * roi_out->width;
+    const float *inb = in + (size_t)ch * roi_in->width * (k + roi_out->y - roi_in->y)
+                       + ch * (roi_out->x - roi_in->x);
+    memcpy(outb, inb, sizeof(float) * roi_out->width * ch);
   }
 
-  // .. just a few spots:
-  for(int i=0; i<d->num_spots; i++)
+  // iterate through all forms
+  dt_masks_form_t *grp = dt_masks_get_from_id_ext(piece->pipe->forms, bp->mask_id);
+  int pos = 0;
+  if(grp && (grp->type & DT_MASKS_GROUP))
   {
-    //we first need to know if we copy the entire form or not
-    // convert in full image space (at scale of ROI)
-    const int x = d->spot[i].x*imw, y = d->spot[i].y*imh;
-    const int xc = d->spot[i].xc*imw, yc = d->spot[i].yc*imh;
-    const int rad = d->spot[i].radius * MIN(piece->buf_in.width, piece->buf_in.height)/scale;
-    
-    int w,h,l,t;
-    l = x-rad;
-    t = y-rad;
-    w = h = 2*rad;
-    
-    //If the destination is outside the ROI, we skip this form !
-    if (t>=roi_out->y+roi_out->height || t+h<=roi_out->y || l>=roi_out->x+roi_out->width || l+w<=roi_out->x) continue;
-    
-    //we only process the visible part of the destination
-    if (t<=roi_out->y) h -= roi_out->y+1-t, t = roi_out->y+1;
-    if (t+h>=roi_out->height+roi_out->y) h = roi_out->y+roi_out->height-1-t;
-    if (l<=roi_out->x) w -= roi_out->x+1-l, l = roi_out->x+1;
-    if (l+w>=roi_out->width+roi_out->x) w = roi_out->x+roi_out->width-1-l;
-    
-    //we don't process part of the source outside the roi_in
-    if (t+yc-y<=roi_in->y) h -= roi_in->y-yc+y+1-t ,t = roi_in->y-yc+y+1;      
-    if (t+h+yc-y>=roi_in->y+roi_in->height) h = roi_in->y+roi_in->height-yc+y-t-1;      
-    if (l+xc-x<=roi_in->x) w -= roi_in->x-xc+x+1-l ,l = roi_in->x-xc+x+1;
-    if (l+w+xc-x>=roi_in->width+roi_in->x) w = roi_in->x+roi_in->width-xc+x-l-1;
-    
-    // convert from world space:     
-    float filter[2*rad + 1];
-    if(rad > 0)
+    GList *forms = g_list_first(grp->points);
+    while((pos < 64) && forms)
     {
-      for(int k=-rad; k<=rad; k++)
+      dt_masks_point_group_t *grpt = (dt_masks_point_group_t *)forms->data;
+      // we get the spot
+      dt_masks_form_t *form = dt_masks_get_from_id_ext(piece->pipe->forms, grpt->formid);
+      if(!form)
       {
-        const float kk = 1.0f - fabsf(k/(float)rad);
-        filter[rad + k] = kk*kk*(3.0f - 2.0f*kk);
+        forms = g_list_next(forms);
+        pos++;
+        continue;
       }
-    }
-    else
-    {
-      filter[0] = 1.0f;
-    }
-    for (int yy=t ; yy<t+h; yy++)
-      for (int xx=l ; xx<l+w; xx++)
+
+      // if the form is outside the roi, we just skip it
+      if(!masks_form_is_in_roi(self, piece, form, roi_in, roi_out))
       {
-        const float f = filter[xx-x+rad+1]*filter[yy-y+rad+1];          
-        for(int c=0; c<ch; c++)
-          out[4*(roi_out->width*(yy-roi_out->y) + xx-roi_out->x) + c] =
-            out[4*(roi_out->width*(yy-roi_out->y) + xx-roi_out->x) + c] * (1.0f-f) +
-            in[4*(roi_in->width*(yy-y+yc-roi_in->y) + xx-x+xc-roi_in->x) + c] * f;
+        forms = g_list_next(forms);
+        pos++;
+        continue;
       }
+
+      if(d->clone_algo[pos] == 1 && (form->type & DT_MASKS_CIRCLE))
+      {
+        dt_masks_point_circle_t *circle = (dt_masks_point_circle_t *)g_list_nth_data(form->points, 0);
+
+        float points[4];
+        masks_point_denormalize(piece, roi_in, circle->center, 1, points);
+        masks_point_denormalize(piece, roi_in, form->source, 1, points + 2);
+
+        if(!dt_dev_distort_transform_plus(self->dev, piece->pipe, 0, self->priority, points, 2))
+        {
+          forms = g_list_next(forms);
+          pos++;
+          continue;
+        }
+
+        // convert from world space:
+        float radius10[2] = { circle->radius, circle->radius };
+        float radf[2];
+        masks_point_denormalize(piece, roi_in, radius10, 1, radf);
+
+        const int rad = MIN(radf[0], radf[1]);
+        const int posx = points[0] - rad;
+        const int posy = points[1] - rad;
+        const int posx_source = points[2] - rad;
+        const int posy_source = points[3] - rad;
+        const int dx = posx - posx_source;
+        const int dy = posy - posy_source;
+        const int fw = 2 * rad, fh = 2 * rad;
+
+        float *filter = malloc((2 * rad + 1) * sizeof(float));
+
+        if(rad > 0)
+        {
+          for(int k = -rad; k <= rad; k++)
+          {
+            const float kk = 1.0f - fabsf(k / (float)rad);
+            filter[rad + k] = kk * kk * (3.0f - 2.0f * kk);
+          }
+        }
+        else
+        {
+          filter[0] = 1.0f;
+        }
+
+        for(int yy = posy; yy < posy + fh; yy++)
+        {
+          // we test if we are inside roi_out
+          if(yy < roi_out->y || yy >= roi_out->y + roi_out->height) continue;
+          // we test if the source point is inside roi_in
+          if(yy - dy < roi_in->y || yy - dy >= roi_in->y + roi_in->height) continue;
+          for(int xx = posx; xx < posx + fw; xx++)
+          {
+            // we test if we are inside roi_out
+            if(xx < roi_out->x || xx >= roi_out->x + roi_out->width) continue;
+            // we test if the source point is inside roi_in
+            if(xx - dx < roi_in->x || xx - dx >= roi_in->x + roi_in->width) continue;
+
+            const float f = filter[xx - posx + 1] * filter[yy - posy + 1];
+            for(int c = 0; c < ch; c++)
+              out[4 * ((size_t)roi_out->width * (yy - roi_out->y) + xx - roi_out->x) + c]
+                  = out[4 * ((size_t)roi_out->width * (yy - roi_out->y) + xx - roi_out->x) + c] * (1.0f - f)
+                    + in[4 * ((size_t)roi_in->width * (yy - posy + posy_source - roi_in->y) + xx - posx
+                              + posx_source - roi_in->x) + c] * f;
+          }
+        }
+
+        free(filter);
+      }
+      else
+      {
+        // we get the mask
+        float *mask = NULL;
+        int posx, posy, width, height;
+        dt_masks_get_mask(self, piece, form, &mask, &width, &height, &posx, &posy);
+        int fts = posy * roi_in->scale, fhs = height * roi_in->scale, fls = posx * roi_in->scale,
+            fws = width * roi_in->scale;
+        int dx = 0, dy = 0;
+
+        // now we search the delta with the source
+        if(!masks_get_delta(self, piece, roi_in, form, &dx, &dy))
+        {
+          forms = g_list_next(forms);
+          pos++;
+          free(mask);
+
+          continue;
+        }
+
+        if(dx != 0 || dy != 0)
+        {
+          // now we do the pixel clone
+          for(int yy = fts + 1; yy < fts + fhs - 1; yy++)
+          {
+            // we test if we are inside roi_out
+            if(yy < roi_out->y || yy >= roi_out->y + roi_out->height) continue;
+            // we test if the source point is inside roi_in
+            if(yy - dy < roi_in->y || yy - dy >= roi_in->y + roi_in->height) continue;
+            for(int xx = fls + 1; xx < fls + fws - 1; xx++)
+            {
+              // we test if we are inside roi_out
+              if(xx < roi_out->x || xx >= roi_out->x + roi_out->width) continue;
+              // we test if the source point is inside roi_in
+              if(xx - dx < roi_in->x || xx - dx >= roi_in->x + roi_in->width) continue;
+
+              float f = mask[((int)((yy - fts) / roi_in->scale)) * width
+                             + (int)((xx - fls) / roi_in->scale)] * grpt->opacity;
+
+              for(int c = 0; c < ch; c++)
+                out[4 * ((size_t)roi_out->width * (yy - roi_out->y) + xx - roi_out->x) + c]
+                    = out[4 * ((size_t)roi_out->width * (yy - roi_out->y) + xx - roi_out->x) + c] * (1.0f - f)
+                      + in[4 * ((size_t)roi_in->width * (yy - dy - roi_in->y) + xx - dx - roi_in->x) + c] * f;
+            }
+          }
+        }
+        free(mask);
+      }
+      pos++;
+      forms = g_list_next(forms);
+    }
   }
 }
 
@@ -372,20 +534,17 @@ void process (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, void 
 void init(dt_iop_module_t *module)
 {
   // we don't need global data:
-  module->data = NULL; //malloc(sizeof(dt_iop_spots_global_data_t));
-  module->params = malloc(sizeof(dt_iop_spots_params_t));
-  module->default_params = malloc(sizeof(dt_iop_spots_params_t));
+  module->data = NULL; // malloc(sizeof(dt_iop_spots_global_data_t));
+  module->params = calloc(1, sizeof(dt_iop_spots_params_t));
+  module->default_params = calloc(1, sizeof(dt_iop_spots_params_t));
   // our module is disabled by default
   // by default:
   module->default_enabled = 0;
-  module->priority = 200; // module order created by iop_dependencies.py, do not edit!
+  module->priority = 171; // module order created by iop_dependencies.py, do not edit!
   module->params_size = sizeof(dt_iop_spots_params_t);
   module->gui_data = NULL;
   // init defaults:
-  dt_iop_spots_params_t tmp = (dt_iop_spots_params_t)
-  {
-    0
-  };
+  dt_iop_spots_params_t tmp = (dt_iop_spots_params_t){ { 0 }, { 2 } };
 
   memcpy(module->params, &tmp, sizeof(dt_iop_spots_params_t));
   memcpy(module->default_params, &tmp, sizeof(dt_iop_spots_params_t));
@@ -393,412 +552,204 @@ void init(dt_iop_module_t *module)
 
 void cleanup(dt_iop_module_t *module)
 {
-  free(module->gui_data);
-  module->gui_data = NULL; // just to be sure
   free(module->params);
   module->params = NULL;
   free(module->data); // just to be sure
   module->data = NULL;
 }
 
-void gui_focus (struct dt_iop_module_t *self, gboolean in)
+void gui_focus(struct dt_iop_module_t *self, gboolean in)
 {
-  dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *)self->gui_data;
+  // dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *)self->gui_data;
   if(self->enabled)
   {
     if(in)
     {
-      // got focus.
-      gui_spot_test_create(self);
+      // got focus, show all shapes
+      dt_masks_set_edit_mode(self, DT_MASKS_EDIT_FULL);
     }
     else
     {
-      // lost focus, delete all gui drawing
-      for (int i=0; i<32; i++)
-      {
-        if (g->spot[i].ok) gui_spot_remove(self,&g->spot[i],i);
-      }
+      // lost focus, hide all shapes
+      if (darktable.develop->form_gui->creation && darktable.develop->form_gui->creation_module == self)
+        dt_masks_change_form_gui(NULL);
+      dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *)self->gui_data;
+      gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_path), FALSE);
+      gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_circle), FALSE);
+      gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_ellipse), FALSE);
+      dt_masks_set_edit_mode(self, DT_MASKS_EDIT_OFF);
     }
   }
 }
 
 /** commit is the synch point between core and gui, so it copies params to pipe data. */
-void commit_params (struct dt_iop_module_t *self, dt_iop_params_t *params, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *params, dt_dev_pixelpipe_t *pipe,
+                   dt_dev_pixelpipe_iop_t *piece)
 {
   memcpy(piece->data, params, sizeof(dt_iop_spots_params_t));
 }
 
-void init_pipe     (struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
 {
   piece->data = malloc(sizeof(dt_iop_spots_data_t));
   self->commit_params(self, self->default_params, pipe, piece);
 }
 
-void cleanup_pipe  (struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
 {
   free(piece->data);
+  piece->data = NULL;
 }
 
 /** gui callbacks, these are needed. */
-void gui_update    (dt_iop_module_t *self)
+void gui_update(dt_iop_module_t *self)
 {
-  dt_iop_spots_params_t *p = (dt_iop_spots_params_t *)self->params;
+  _resynch_params(self);
   dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *)self->gui_data;
-  char str[3];
-  snprintf(str,3,"%d",p->num_spots);
+  // update clones count
+  dt_masks_form_t *grp = dt_masks_get_from_id(self->dev, self->blend_params->mask_id);
+  guint nb = 0;
+  if(grp && (grp->type & DT_MASKS_GROUP)) nb = g_list_length(grp->points);
+  gchar *str = g_strdup_printf("%d", nb);
   gtk_label_set_text(g->label, str);
-
+  g_free(str);
+  // update buttons status
+  int b1 = 0, b2 = 0, b3 = 0;
+  if(self->dev->form_gui && self->dev->form_visible && self->dev->form_gui->creation
+     && self->dev->form_gui->creation_module == self)
+  {
+    if(self->dev->form_visible->type & DT_MASKS_CIRCLE)
+      b1 = 1;
+    else if(self->dev->form_visible->type & DT_MASKS_PATH)
+      b2 = 1;
+    else if(self->dev->form_visible->type & DT_MASKS_ELLIPSE)
+      b3 = 1;
+  }
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_circle), b1);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_path), b2);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_ellipse), b3);
 }
 
-void gui_init     (dt_iop_module_t *self)
+void gui_init(dt_iop_module_t *self)
 {
+  const int bs = DT_PIXEL_APPLY_DPI(14);
   self->gui_data = malloc(sizeof(dt_iop_spots_gui_data_t));
   dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *)self->gui_data;
-  g->dragging = -1;
-  g->selected = -1;
-  g->last_radius = MAX(0.01f, dt_conf_get_float("plugins/darkroom/spots/size"));
 
-  for (int i=0; i<32; i++)
-  {
-    g->spot[i].ok = 0;
-  }
-  g->pipe_hash = 0;
-  
-  self->widget = gtk_vbox_new(FALSE, 5);
-  GtkWidget *label = gtk_label_new(_("click on a spot and drag on canvas to heal.\nuse the mouse wheel to adjust size.\nright click to remove a stroke."));
-  gtk_misc_set_alignment(GTK_MISC(label), 0.0f, 0.5f);
-  gtk_box_pack_start(GTK_BOX(self->widget), label, FALSE, TRUE, 0);
-  GtkWidget * hbox = gtk_hbox_new(FALSE, 5);
-  label = gtk_label_new(_("number of strokes:"));
+  self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+  dt_gui_add_help_link(self->widget, dt_get_help_url(self->op));
+  GtkWidget *hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+  GtkWidget *label = gtk_label_new(_("number of strokes:"));
   gtk_box_pack_start(GTK_BOX(hbox), label, FALSE, TRUE, 0);
   g->label = GTK_LABEL(gtk_label_new("-1"));
+  gtk_widget_set_tooltip_text(hbox, _("click on a shape and drag on canvas.\nuse the mouse wheel "
+                                      "to adjust size.\nright click to remove a shape."));
+
+  g->bt_path = dtgtk_togglebutton_new(dtgtk_cairo_paint_masks_path, CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);
+  g_signal_connect(G_OBJECT(g->bt_path), "button-press-event", G_CALLBACK(_add_path), self);
+  gtk_widget_set_tooltip_text(g->bt_path, _("add path"));
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_path), FALSE);
+  gtk_widget_set_size_request(GTK_WIDGET(g->bt_path), bs, bs);
+  gtk_box_pack_end(GTK_BOX(hbox), g->bt_path, FALSE, FALSE, 0);
+
+  g->bt_ellipse
+      = dtgtk_togglebutton_new(dtgtk_cairo_paint_masks_ellipse, CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);
+  g_signal_connect(G_OBJECT(g->bt_ellipse), "button-press-event", G_CALLBACK(_add_ellipse), self);
+  gtk_widget_set_tooltip_text(g->bt_ellipse, _("add ellipse"));
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_ellipse), FALSE);
+  gtk_widget_set_size_request(GTK_WIDGET(g->bt_ellipse), bs, bs);
+  gtk_box_pack_end(GTK_BOX(hbox), g->bt_ellipse, FALSE, FALSE, 0);
+
+  g->bt_circle
+      = dtgtk_togglebutton_new(dtgtk_cairo_paint_masks_circle, CPF_STYLE_FLAT | CPF_DO_NOT_USE_BORDER, NULL);
+  g_signal_connect(G_OBJECT(g->bt_circle), "button-press-event", G_CALLBACK(_add_circle), self);
+  gtk_widget_set_tooltip_text(g->bt_circle, _("add circle"));
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_circle), FALSE);
+  gtk_widget_set_size_request(GTK_WIDGET(g->bt_circle), bs, bs);
+  gtk_box_pack_end(GTK_BOX(hbox), g->bt_circle, FALSE, FALSE, 0);
+
   gtk_box_pack_start(GTK_BOX(hbox), GTK_WIDGET(g->label), FALSE, TRUE, 0);
   gtk_box_pack_start(GTK_BOX(self->widget), hbox, TRUE, TRUE, 0);
 }
 
-void gui_cleanup  (dt_iop_module_t *self)
+void gui_reset(struct dt_iop_module_t *self)
 {
-  dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *)self->gui_data;
+  // hide the previous masks
+  dt_masks_reset_form_gui();
+}
+
+void gui_cleanup(dt_iop_module_t *self)
+{
+  // dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *)self->gui_data;
   // nothing else necessary, gtk will clean up the labels
-  for (int i=0; i<32; i++)
-  {
-    if (g->spot[i].ok) gui_spot_remove(self,&g->spot[i],i);
-  }
+
   free(self->gui_data);
   self->gui_data = NULL;
 }
 
-void gui_post_expose(dt_iop_module_t *self, cairo_t *cr, int32_t width, int32_t height, int32_t pointerx, int32_t pointery)
+void init_key_accels (dt_iop_module_so_t *module)
 {
-  dt_develop_t *dev = self->dev;
-  dt_iop_spots_params_t   *p = (dt_iop_spots_params_t   *)self->params;
-  dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *)self->gui_data;
-  float wd = dev->preview_pipe->backbuf_width;
-  float ht = dev->preview_pipe->backbuf_height;
-  if (wd < 1.0 || ht < 1.0) return;
-  float pzx, pzy;
-  dt_dev_get_pointer_zoom_pos(dev, pointerx, pointery, &pzx, &pzy);
-  pzx += 0.5f;
-  pzy += 0.5f;
-  float zoom_x, zoom_y;
-  int32_t zoom, closeup;
-  DT_CTL_GET_GLOBAL(zoom_y, dev_zoom_y);
-  DT_CTL_GET_GLOBAL(zoom_x, dev_zoom_x);
-  DT_CTL_GET_GLOBAL(zoom, dev_zoom);
-  DT_CTL_GET_GLOBAL(closeup, dev_closeup);
-  float zoom_scale = dt_dev_get_zoom_scale(dev, zoom, closeup ? 2 : 1, 1);
-
-  cairo_set_source_rgb(cr, .3, .3, .3);
-
-  cairo_translate(cr, width/2.0, height/2.0f);
-  cairo_scale(cr, zoom_scale, zoom_scale);
-  cairo_translate(cr, -.5f*wd-zoom_x*wd, -.5f*ht-zoom_y*ht);
-
-  double dashed[] = {4.0, 2.0};
-  dashed[0] /= zoom_scale;
-  dashed[1] /= zoom_scale;
-  
-  //we update the spots if needed
-  if (!gui_spot_test_create(self)) return;
-  
-  for(int i=0; i<p->num_spots; i++)
-  {
-    spot_draw_t gspt = g->spot[i];
-    if (gspt.pts_count < 4) continue;
-    cairo_set_dash(cr, dashed, 0, 0);
-    
-    float src_x, src_y, spt_x, spt_y;
-    
-    //source
-    cairo_set_line_cap(cr,CAIRO_LINE_CAP_ROUND);
-    if(i == g->selected || i == g->dragging) cairo_set_line_width(cr, 5.0/zoom_scale);
-    else                                     cairo_set_line_width(cr, 3.0/zoom_scale);
-    cairo_set_source_rgba(cr, .3, .3, .3, .8);
-    if (g->dragging == i && g->hoover_c)
-    {
-      src_x = p->spot[i].xc*wd;
-      src_y = p->spot[i].yc*ht;
-      float dx = src_x - gspt.source[0], dy = src_y - gspt.source[1];
-      cairo_move_to(cr,gspt.source[2]+dx,gspt.source[3]+dy);
-      for (int i=2; i<gspt.pts_count; i++)
-      {
-        cairo_line_to(cr,gspt.source[i*2]+dx,gspt.source[i*2+1]+dy);
-      }
-      cairo_line_to(cr,gspt.source[2]+dx,gspt.source[3]+dy);
-    }
-    else
-    {
-      cairo_move_to(cr,gspt.source[2],gspt.source[3]);
-      for (int i=2; i<gspt.pts_count; i++)
-      {
-        cairo_line_to(cr,gspt.source[i*2],gspt.source[i*2+1]);
-      }
-      cairo_line_to(cr,gspt.source[2],gspt.source[3]);
-      src_x = gspt.source[0];
-      src_y = gspt.source[1];
-    }
-    cairo_stroke_preserve(cr);
-    if(i == g->selected || i == g->dragging) cairo_set_line_width(cr, 2.0/zoom_scale);
-    else                                     cairo_set_line_width(cr, 1.0/zoom_scale);
-    cairo_set_source_rgba(cr, .8, .8, .8, .8);
-    cairo_stroke(cr);
-    
-    //spot
-    cairo_set_line_cap(cr,CAIRO_LINE_CAP_ROUND);
-    if(i == g->selected || i == g->dragging) cairo_set_line_width(cr, 5.0/zoom_scale);
-    else                                     cairo_set_line_width(cr, 3.0/zoom_scale);
-    cairo_set_source_rgba(cr, .3, .3, .3, .8);
-    if (g->dragging == i && !g->hoover_c)
-    {
-      spt_x = p->spot[i].x*wd;
-      spt_y = p->spot[i].y*ht;
-      float dx = spt_x - gspt.spot[0], dy = spt_y - gspt.spot[1];
-      cairo_move_to(cr,gspt.spot[2]+dx,gspt.spot[3]+dy);
-      for (int i=2; i<gspt.pts_count; i++)
-      {
-        cairo_line_to(cr,gspt.spot[i*2]+dx,gspt.spot[i*2+1]+dy);
-      }
-      cairo_line_to(cr,gspt.spot[2]+dx,gspt.spot[3]+dy);
-    }
-    else
-    {
-      cairo_move_to(cr,gspt.spot[2],gspt.spot[3]);
-      for (int i=2; i<gspt.pts_count; i++)
-      {
-        cairo_line_to(cr,gspt.spot[i*2],gspt.spot[i*2+1]);
-      }
-      cairo_line_to(cr,gspt.spot[2],gspt.spot[3]);
-      spt_x = gspt.spot[0];
-      spt_y = gspt.spot[1];
-    }
-    cairo_stroke_preserve(cr);
-    if(i == g->selected || i == g->dragging) cairo_set_line_width(cr, 2.0/zoom_scale);
-    else                                     cairo_set_line_width(cr, 1.0/zoom_scale);
-    cairo_set_source_rgba(cr, .8, .8, .8, .8);
-    cairo_stroke(cr);
-    
-    //line between
-    cairo_set_line_cap(cr,CAIRO_LINE_CAP_ROUND);
-    if(i == g->selected || i == g->dragging) cairo_set_line_width(cr, 5.0/zoom_scale);
-    else                                     cairo_set_line_width(cr, 3.0/zoom_scale);
-    cairo_set_source_rgba(cr, .3, .3, .3, .8);
-    cairo_move_to(cr,src_x,src_y);
-    cairo_line_to(cr,spt_x,spt_y);
-    cairo_stroke_preserve(cr);
-    if(i == g->selected || i == g->dragging) cairo_set_line_width(cr, 2.0/zoom_scale);
-    else                                     cairo_set_line_width(cr, 1.0/zoom_scale);
-    cairo_set_source_rgba(cr, .8, .8, .8, .8);
-    cairo_stroke(cr);
-  }
+  dt_accel_register_iop (module, TRUE, NC_("accel", "spot circle tool"),   0, 0);
+  dt_accel_register_iop (module, TRUE, NC_("accel", "spot elipse tool"),   0, 0);
+  dt_accel_register_iop (module, TRUE, NC_("accel", "spot path tool"),     0, 0);
+  dt_accel_register_iop (module, TRUE, NC_("accel", "spot show or hide"),  0, 0);
 }
 
-int mouse_moved(dt_iop_module_t *self, double x, double y, int which)
+static gboolean _add_circle_key_accel(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,
+                                      GdkModifierType modifier, gpointer data)
 {
-  dt_iop_spots_params_t   *p = (dt_iop_spots_params_t   *)self->params;
-  dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *)self->gui_data;
-  // draw line (call post expose)
-  // highlight selected point, if any
-  float pzx, pzy;
-  dt_dev_get_pointer_zoom_pos(self->dev, x, y, &pzx, &pzy);
-  float wd = self->dev->preview_pipe->backbuf_width;
-  float ht = self->dev->preview_pipe->backbuf_height;
-  pzx += 0.5f;
-  pzy += 0.5f;
-  float mind = FLT_MAX;
-  int selected = -1;
-  const int old_sel = g->selected;
-  gboolean hoover_c = g->hoover_c;
-  g->selected = -1;
-  if(g->dragging < 0) for(int i=0; i<p->num_spots; i++)
-    {
-      if (!g->spot[i].ok) continue;
-      float dist = (pzx*wd - g->spot[i].spot[0])*(pzx*wd - g->spot[i].spot[0]) + (pzy*ht - g->spot[i].spot[1])*(pzy*ht - g->spot[i].spot[1]);
-      if(dist < mind)
-      {
-        mind = dist;
-        selected = i;
-        hoover_c = FALSE;
-      }
-      dist = (pzx*wd - g->spot[i].source[0])*(pzx*wd - g->spot[i].source[0]) + (pzy*ht - g->spot[i].source[1])*(pzy*ht - g->spot[i].source[1]);
-      if(dist < mind)
-      {
-        mind = dist;
-        selected = i;
-        hoover_c = TRUE;
-      }
-    }
-  else
-  {
-    if(g->hoover_c)
-    {
-      p->spot[g->dragging].xc = pzx;
-      p->spot[g->dragging].yc = pzy;
-    }
-    else
-    {
-      p->spot[g->dragging].x = pzx;
-      p->spot[g->dragging].y = pzy;
-    }
-  }
-  if(selected >= 0 && mind < p->spot[selected].radius * p->spot[selected].radius * wd * wd)
-  {
-    g->selected = selected;
-    g->hoover_c = hoover_c;
-  }
-  if(g->dragging >= 0 || g->selected != old_sel) dt_control_queue_redraw_center();
-  return 1;
+  dt_iop_module_t *module = (dt_iop_module_t *)data;
+  const dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *) module->gui_data;
+  _add_circle(GTK_WIDGET(g->bt_circle), NULL, module);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_circle), TRUE);
+  return TRUE;
 }
 
-int scrolled(dt_iop_module_t *self, double x, double y, int up, uint32_t state)
+static gboolean _add_ellipse_key_accel(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,
+                                       GdkModifierType modifier, gpointer data)
 {
-  dt_iop_spots_params_t   *p = (dt_iop_spots_params_t   *)self->params;
-  dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *)self->gui_data;
-  if(g->selected >= 0)
-  {
-    if(up && p->spot[g->selected].radius > 0.002f) p->spot[g->selected].radius *= 0.9f;
-    else  if(p->spot[g->selected].radius < 0.1f  ) p->spot[g->selected].radius *= 1.0f/0.9f;
-    gui_spot_update_radius(self,&g->spot[g->selected],g->selected);
-    g->last_radius = p->spot[g->selected].radius;
-    dt_conf_set_float("plugins/darkroom/spots/size", g->last_radius);
-    dt_dev_add_history_item(darktable.develop, self, TRUE);
-    return 1;
-  }
-  return 0;
+  dt_iop_module_t *module = (dt_iop_module_t *)data;
+  const dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *) module->gui_data;
+  _add_ellipse(GTK_WIDGET(g->bt_ellipse), NULL, module);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_ellipse), TRUE);
+  return TRUE;
 }
 
-int button_pressed(dt_iop_module_t *self, double x, double y, int which, int type, uint32_t state)
+static gboolean _add_path_key_accel(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,
+                                    GdkModifierType modifier, gpointer data)
 {
-  // set new point, select it, start drag
-  if(self->off) gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(self->off), 1);
-  dt_iop_spots_params_t   *p = (dt_iop_spots_params_t   *)self->params;
-  dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *)self->gui_data;
-  if(which == 1)
-  {
-    float pzx, pzy;
-    dt_dev_get_pointer_zoom_pos(self->dev, x, y, &pzx, &pzy);
-    pzx += 0.5f;
-    pzy += 0.5f;
-
-    if(g->selected < 0)
-    {
-      if(p->num_spots == 32)
-      {
-        dt_control_log(_("spot removal only supports up to 32 spots"));
-        return 1;
-      }
-      
-      const int i = p->num_spots++;
-      g->dragging = i;
-      // on *wd|*ht scale, radius on *min(wd, ht).
-      float wd = self->dev->preview_pipe->backbuf_width;
-      float ht = self->dev->preview_pipe->backbuf_height;
-      p->spot[i].radius = g->last_radius;
-      float pts[2] = {pzx*wd,pzy*ht};
-      dt_dev_distort_backtransform(self->dev,pts,1);
-      p->spot[i].x = pts[0]/self->dev->preview_pipe->iwidth;
-      p->spot[i].y = pts[1]/self->dev->preview_pipe->iheight;
-      p->spot[i].xc = pzx;
-      p->spot[i].yc = pzy;
-      gui_spot_add(self,&g->spot[i],i);
-      g->selected = i;
-      g->hoover_c = TRUE;
-      
-    }
-    else
-    {
-      g->dragging = g->selected;
-      if (g->hoover_c)
-      {
-        p->spot[g->selected].xc = pzx;
-        p->spot[g->selected].yc = pzy;
-      }
-      else
-      {
-        p->spot[g->selected].x = pzx;
-        p->spot[g->selected].y = pzy;
-      }
-    }
-    return 1;
-  }
-  return 0;
+  dt_iop_module_t *module = (dt_iop_module_t *)data;
+  const dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *) module->gui_data;
+  _add_path(GTK_WIDGET(g->bt_path), NULL, module);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->bt_path), TRUE);
+  return TRUE;
 }
 
-int button_released(struct dt_iop_module_t *self, double x, double y, int which, uint32_t state)
+static gboolean _show_hide_key_accel(GtkAccelGroup *accel_group, GObject *acceleratable, guint keyval,
+                                     GdkModifierType modifier, gpointer data)
 {
-  // end point, stop drag
-  dt_iop_spots_params_t   *p = (dt_iop_spots_params_t   *)self->params;
-  dt_iop_spots_gui_data_t *g = (dt_iop_spots_gui_data_t *)self->gui_data;
-  if(which == 1 && g->dragging >= 0)
-  {
-    float pzx, pzy;
-    dt_dev_get_pointer_zoom_pos(self->dev, x, y, &pzx, &pzy);
-    pzx += 0.5f;
-    pzy += 0.5f;
-    const int i = g->dragging;
-    float wd = self->dev->preview_pipe->backbuf_width;
-    float ht = self->dev->preview_pipe->backbuf_height;
-    float pts[2] = {pzx*wd,pzy*ht};
-    dt_dev_distort_backtransform(self->dev,pts,1);
-    if(g->hoover_c)
-    {
-      p->spot[i].xc = pts[0]/self->dev->preview_pipe->iwidth;
-      p->spot[i].yc = pts[1]/self->dev->preview_pipe->iheight;
-      gui_spot_update_source(self,&g->spot[i],i);
-    }
-    else
-    {
-      p->spot[i].x = pts[0]/self->dev->preview_pipe->iwidth;
-      p->spot[i].y = pts[1]/self->dev->preview_pipe->iheight;
-      gui_spot_update_spot(self,&g->spot[i],i);
-    }
-    g->selected = -1;
-    dt_dev_add_history_item(darktable.develop, self, TRUE);
-    g->dragging = -1;
-    char str[3];
-    snprintf(str,3,"%d",p->num_spots);
-    gtk_label_set_text(g->label, str);
+  dt_iop_module_t *module = (dt_iop_module_t *)data;
+  dt_masks_set_edit_mode(module, module->dev->form_gui->edit_mode == DT_MASKS_EDIT_FULL ? DT_MASKS_EDIT_OFF : DT_MASKS_EDIT_FULL);
+  return TRUE;
+}
 
-    return 1;
-  }
-  else if(which == 3 && g->selected >= 0)
-  {
-    // remove brush stroke
-    const int i = --(p->num_spots);
-    if(i > 0)
-    {
-      memcpy(p->spot + g->selected, p->spot + i, sizeof(spot_t));
-      gui_spot_remove(self,&g->spot[g->selected],g->selected);
-      memcpy(g->spot + g->selected, g->spot + i, sizeof(spot_draw_t));
-    }
-    dt_dev_add_history_item(darktable.develop, self, TRUE);
-    g->selected = -1;
-    char str[3];
-    snprintf(str,3,"%d",p->num_spots);
-    gtk_label_set_text(g->label, str);
-  }
-  return 0;
+void connect_key_accels (dt_iop_module_t *module)
+{
+  GClosure *closure;
+
+  closure = g_cclosure_new(G_CALLBACK(_add_circle_key_accel), (gpointer)module, NULL);
+  dt_accel_connect_iop (module, "spot circle tool", closure);
+
+  closure = g_cclosure_new(G_CALLBACK(_add_ellipse_key_accel), (gpointer)module, NULL);
+  dt_accel_connect_iop (module, "spot elipse tool", closure);
+
+  closure = g_cclosure_new(G_CALLBACK(_add_path_key_accel), (gpointer)module, NULL);
+  dt_accel_connect_iop (module, "spot path tool", closure);
+
+  closure = g_cclosure_new(G_CALLBACK(_show_hide_key_accel), (gpointer)module, NULL);
+  dt_accel_connect_iop (module, "spot show or hide", closure);
 }
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
-// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

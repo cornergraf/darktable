@@ -15,33 +15,29 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
-#ifdef HAVE_RAWSPEED
+
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
+#include "RawSpeed-API.h"
+
 #include <memory>
 
-#include "rawspeed/RawSpeed/StdAfx.h"
-#include "rawspeed/RawSpeed/FileReader.h"
-#include "rawspeed/RawSpeed/RawDecoder.h"
-#include "rawspeed/RawSpeed/RawParser.h"
-#include "rawspeed/RawSpeed/CameraMetaData.h"
-#include "rawspeed/RawSpeed/ColorFilterArray.h"
+#define __STDC_LIMIT_MACROS
 
-extern "C"
-{
-#include "imageio.h"
-#include "common/imageio_rawspeed.h"
-#include "common/exif.h"
-#include "common/darktable.h"
+extern "C" {
 #include "common/colorspaces.h"
+#include "common/darktable.h"
+#include "common/exif.h"
 #include "common/file_location.h"
+#include "common/imageio_rawspeed.h"
+#include "imageio.h"
+#include <stdint.h>
 }
 
 // define this function, it is only declared in rawspeed:
-int
-rawspeed_get_number_of_processor_cores()
+int rawspeed_get_number_of_processor_cores()
 {
 #ifdef _OPENMP
   return omp_get_num_procs();
@@ -50,71 +46,91 @@ rawspeed_get_number_of_processor_cores()
 #endif
 }
 
-using namespace RawSpeed;
+using namespace rawspeed;
 
-dt_imageio_retval_t dt_imageio_open_rawspeed_sraw(dt_image_t *img, RawImage r, dt_mipmap_cache_allocator_t a);
+static dt_imageio_retval_t dt_imageio_open_rawspeed_sraw (dt_image_t *img, RawImage r, dt_mipmap_buffer_t *buf);
 static CameraMetaData *meta = NULL;
 
-#if 0
-static void
-scale_black_white(uint16_t *const buf, const uint16_t black, const uint16_t white, const int width, const int height, const int stride)
-{
-  const float scale = 65535.0f/(white-black);
-#ifdef _OPENMP
-  #pragma omp parallel for default(none) schedule(static)
-#endif
-  for(int j=0; j<height; j++)
+static void dt_rawspeed_load_meta() {
+  /* Load rawspeed cameras.xml meta file once */
+  if(meta == NULL)
   {
-    uint16_t *b = buf + j*stride;
-    for(int i=0; i<width; i++)
+    dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
+    if(meta == NULL)
     {
-      b[0] = CLAMPS((b[0] - black)*scale, 0, 0xffff);
-      b++;
+      char datadir[PATH_MAX] = { 0 }, camfile[PATH_MAX] = { 0 };
+      dt_loc_get_datadir(datadir, sizeof(datadir));
+      snprintf(camfile, sizeof(camfile), "%s/rawspeed/cameras.xml", datadir);
+      // never cleaned up (only when dt closes)
+      meta = new CameraMetaData(camfile);
     }
+    dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
   }
 }
-#endif
 
-dt_imageio_retval_t
-dt_imageio_open_rawspeed(
-  dt_image_t  *img,
-  const char  *filename,
-  dt_mipmap_cache_allocator_t a)
+void dt_rawspeed_lookup_makermodel(const char *maker, const char *model,
+                                   char *mk, int mk_len, char *md, int md_len,
+                                   char *al, int al_len)
 {
-  if(!img->exif_inited)
-    (void) dt_exif_read(img, filename);
+  int got_it_done = FALSE;
+  try {
+    dt_rawspeed_load_meta();
+    const Camera *cam = meta->getCamera(maker, model, "");
+    // Also look for dng cameras
+    if (!cam)
+      cam = meta->getCamera(maker, model, "dng");
+    if (cam)
+    {
+      g_strlcpy(mk, cam->canonical_make.c_str(), mk_len);
+      g_strlcpy(md, cam->canonical_model.c_str(), md_len);
+      g_strlcpy(al, cam->canonical_alias.c_str(), al_len);
+      got_it_done = TRUE;
+    }
+  }
+  catch(const std::exception &exc)
+  {
+    printf("[rawspeed] %s\n", exc.what());
+  }
 
-  char filen[1024];
-  snprintf(filen, 1024, "%s", filename);
+  if (!got_it_done)
+  {
+    // We couldn't find the camera or caught some exception, just punt and pass
+    // through the same values
+    g_strlcpy(mk, maker, mk_len);
+    g_strlcpy(md, model, md_len);
+    g_strlcpy(al, model, al_len);
+  }
+}
+
+uint32_t dt_rawspeed_crop_dcraw_filters(uint32_t filters, uint32_t crop_x, uint32_t crop_y)
+{
+  if(!filters || filters == 9u) return filters;
+
+  return ColorFilterArray::shiftDcrawFilter(filters, crop_x, crop_y);
+}
+
+dt_imageio_retval_t dt_imageio_open_rawspeed(dt_image_t *img, const char *filename,
+                                             dt_mipmap_buffer_t *mbuf)
+{
+  if(!img->exif_inited) (void)dt_exif_read(img, filename);
+
+  char filen[PATH_MAX] = { 0 };
+  snprintf(filen, sizeof(filen), "%s", filename);
   FileReader f(filen);
 
-  std::auto_ptr<RawDecoder> d;
-  std::auto_ptr<FileMap> m;
+  std::unique_ptr<RawDecoder> d;
+  std::unique_ptr<const Buffer> m;
 
   try
   {
-    /* Load rawspeed cameras.xml meta file once */
-    if(meta == NULL)
-    {
-      dt_pthread_mutex_lock(&darktable.plugin_threadsafe);
-      if(meta == NULL)
-      {
-        char datadir[1024], camfile[1024];
-        dt_loc_get_datadir(datadir, 1024);
-        snprintf(camfile, 1024, "%s/rawspeed/cameras.xml", datadir);
-        // never cleaned up (only when dt closes)
-        meta = new CameraMetaData(camfile);
-      }
-      dt_pthread_mutex_unlock(&darktable.plugin_threadsafe);
-    }
+    dt_rawspeed_load_meta();
 
-    m = auto_ptr<FileMap>(f.readFile());
+    m = f.readFile();
 
     RawParser t(m.get());
-    d = auto_ptr<RawDecoder>(t.getDecoder());
+    d = t.getDecoder(meta);
 
-    if(!d.get())
-      return DT_IMAGEIO_FILE_CORRUPTED;
+    if(!d.get()) return DT_IMAGEIO_FILE_CORRUPTED;
 
     d->failOnUnknown = true;
     d->checkSupport(meta);
@@ -122,103 +138,295 @@ dt_imageio_open_rawspeed(
     d->decodeMetaData(meta);
     RawImage r = d->mRaw;
 
+    const auto errors = r->getErrors();
+    for(const auto &error : errors) fprintf(stderr, "[rawspeed] (%s) %s\n", img->filename, error.c_str());
+
+    g_strlcpy(img->camera_maker, r->metadata.canonical_make.c_str(), sizeof(img->camera_maker));
+    g_strlcpy(img->camera_model, r->metadata.canonical_model.c_str(), sizeof(img->camera_model));
+    g_strlcpy(img->camera_alias, r->metadata.canonical_alias.c_str(), sizeof(img->camera_alias));
+    dt_image_refresh_makermodel(img);
+
+    // We used to partial match the Canon local rebrandings so lets pass on
+    // the value just in those cases to be able to fix old history stacks
+    static const struct {
+      const char *mungedname;
+      const char *origname;
+    } legacy_aliases[] = {
+      {"Canon EOS","Canon EOS REBEL SL1"},
+      {"Canon EOS","Canon EOS Kiss X7"},
+      {"Canon EOS","Canon EOS DIGITAL REBEL XT"},
+      {"Canon EOS","Canon EOS Kiss Digital N"},
+      {"Canon EOS","Canon EOS 350D"},
+      {"Canon EOS","Canon EOS DIGITAL REBEL XSi"},
+      {"Canon EOS","Canon EOS Kiss Digital X2"},
+      {"Canon EOS","Canon EOS Kiss X2"},
+      {"Canon EOS","Canon EOS REBEL T5i"},
+      {"Canon EOS","Canon EOS Kiss X7i"},
+      {"Canon EOS","Canon EOS Rebel T6i"},
+      {"Canon EOS","Canon EOS Kiss X8i"},
+      {"Canon EOS","Canon EOS Rebel T6s"},
+      {"Canon EOS","Canon EOS 8000D"},
+      {"Canon EOS","Canon EOS REBEL T1i"},
+      {"Canon EOS","Canon EOS Kiss X3"},
+      {"Canon EOS","Canon EOS REBEL T2i"},
+      {"Canon EOS","Canon EOS Kiss X4"},
+      {"Canon EOS REBEL T3","Canon EOS REBEL T3i"},
+      {"Canon EOS","Canon EOS Kiss X5"},
+      {"Canon EOS","Canon EOS REBEL T4i"},
+      {"Canon EOS","Canon EOS Kiss X6i"},
+      {"Canon EOS","Canon EOS DIGITAL REBEL XS"},
+      {"Canon EOS","Canon EOS Kiss Digital F"},
+      {"Canon EOS","Canon EOS REBEL T5"},
+      {"Canon EOS","Canon EOS Kiss X70"},
+      {"Canon EOS","Canon EOS DIGITAL REBEL XTi"},
+      {"Canon EOS","Canon EOS Kiss Digital X"},
+    };
+
+    for (uint32 i=0; i<(sizeof(legacy_aliases)/sizeof(legacy_aliases[1])); i++)
+      if (!strcmp(legacy_aliases[i].origname, r->metadata.model.c_str())) {
+        g_strlcpy(img->camera_legacy_makermodel, legacy_aliases[i].mungedname, sizeof(img->camera_legacy_makermodel));
+        break;
+      }
+
+    img->raw_black_level = r->blackLevel;
+    img->raw_white_point = r->whitePoint;
+
+    if(r->blackLevelSeparate[0] == -1 || r->blackLevelSeparate[1] == -1 || r->blackLevelSeparate[2] == -1
+       || r->blackLevelSeparate[3] == -1)
+    {
+      r->calculateBlackAreas();
+    }
+
+    for(uint8_t i = 0; i < 4; i++) img->raw_black_level_separate[i] = r->blackLevelSeparate[i];
+
+    if(r->blackLevel == -1)
+    {
+      float black = 0.0f;
+      for(uint8_t i = 0; i < 4; i++)
+      {
+        black += img->raw_black_level_separate[i];
+      }
+      black /= 4.0f;
+
+      img->raw_black_level = CLAMP(black, 0, UINT16_MAX);
+    }
+
+    /*
+     * FIXME
+     * if(r->whitePoint == 65536)
+     *   ???
+     */
+
     /* free auto pointers on spot */
     d.reset();
     m.reset();
 
-    img->filters = 0;
-    if( r->subsampling.x > 1 || r->subsampling.y > 1 )
-    {
-      img->flags &= ~DT_IMAGE_LDR;
-      img->flags |= DT_IMAGE_RAW;
+    // Grab the WB
+    for(int i = 0; i < 4; i++) img->wb_coeffs[i] = r->metadata.wbCoeffs[i];
 
-      dt_imageio_retval_t ret = dt_imageio_open_rawspeed_sraw(img, r, a);
+    img->buf_dsc.filters = 0u;
+    if(!r->isCFA && !dt_image_is_monochrome(img))
+    {
+      dt_imageio_retval_t ret = dt_imageio_open_rawspeed_sraw(img, r, mbuf);
       return ret;
     }
 
-    // only scale colors for sizeof(uint16_t) per pixel, not sizeof(float)
-    // if(r->getDataType() != TYPE_FLOAT32) scale_black_white((uint16_t *)r->getData(), r->blackLevel, r->whitePoint, r->dim.x, r->dim.y, r->pitch/r->getBpp());
-    if(r->getDataType() != TYPE_FLOAT32) r->scaleBlackWhite();
-    img->bpp = r->getBpp();
-    img->filters = r->cfa.getDcrawFilter();
-    if(img->filters)
+    if((r->getDataType() != TYPE_USHORT16) && (r->getDataType() != TYPE_FLOAT32)) return DT_IMAGEIO_FILE_CORRUPTED;
+
+    if((r->getBpp() != sizeof(uint16_t)) && (r->getBpp() != sizeof(float))) return DT_IMAGEIO_FILE_CORRUPTED;
+
+    if((r->getDataType() == TYPE_USHORT16) && (r->getBpp() != sizeof(uint16_t))) return DT_IMAGEIO_FILE_CORRUPTED;
+
+    if((r->getDataType() == TYPE_FLOAT32) && (r->getBpp() != sizeof(float))) return DT_IMAGEIO_FILE_CORRUPTED;
+
+    const float cpp = r->getCpp();
+    if(cpp != 1) return DT_IMAGEIO_FILE_CORRUPTED;
+
+    img->buf_dsc.channels = 1;
+
+    switch(r->getBpp())
+    {
+      case sizeof(uint16_t):
+        img->buf_dsc.datatype = TYPE_UINT16;
+        break;
+      case sizeof(float):
+        img->buf_dsc.datatype = TYPE_FLOAT;
+        break;
+      default:
+        return DT_IMAGEIO_FILE_CORRUPTED;
+        break;
+    }
+
+    // dimensions of uncropped image
+    iPoint2D dimUncropped = r->getUncroppedDim();
+    img->width = dimUncropped.x;
+    img->height = dimUncropped.y;
+
+    // dimensions of cropped image
+    iPoint2D dimCropped = r->dim;
+
+    // crop - Top,Left corner
+    iPoint2D cropTL = r->getCropOffset();
+    img->crop_x = cropTL.x;
+    img->crop_y = cropTL.y;
+
+    // crop - Bottom,Right corner
+    iPoint2D cropBR = dimUncropped - dimCropped - cropTL;
+    img->crop_width = cropBR.x;
+    img->crop_height = cropBR.y;
+
+    img->fuji_rotation_pos = r->metadata.fujiRotationPos;
+    img->pixel_aspect_ratio = (float)r->metadata.pixelAspectRatio;
+
+    // as the X-Trans filters comments later on states, these are for
+    // cropped image, so we need to uncrop them.
+    img->buf_dsc.filters = dt_rawspeed_crop_dcraw_filters(r->cfa.getDcrawFilter(), cropTL.x, cropTL.y);
+
+    if(FILTERS_ARE_4BAYER(img->buf_dsc.filters)) img->flags |= DT_IMAGE_4BAYER;
+
+    if(img->buf_dsc.filters)
     {
       img->flags &= ~DT_IMAGE_LDR;
       img->flags |= DT_IMAGE_RAW;
-      if(r->getDataType() == TYPE_FLOAT32) img->flags |= DT_IMAGE_HDR;
+      if(r->getDataType() == TYPE_FLOAT32)
+      {
+        img->flags |= DT_IMAGE_HDR;
+
+        // we assume that image is normalized before.
+        // FIXME: not true for hdrmerge DNG's.
+        for(int k = 0; k < 4; k++) img->buf_dsc.processed_maximum[k] = 1.0f;
+      }
+
+      // special handling for x-trans sensors
+      if(img->buf_dsc.filters == 9u)
+      {
+        // get 6x6 CFA offset from top left of cropped image
+        // NOTE: This is different from how things are done with Bayer
+        // sensors. For these, the CFA in cameras.xml is pre-offset
+        // depending on the distance modulo 2 between raw and usable
+        // image data. For X-Trans, the CFA in cameras.xml is
+        // (currently) aligned with the top left of the raw data.
+        for(int i = 0; i < 6; ++i)
+          for(int j = 0; j < 6; ++j)
+          {
+            img->buf_dsc.xtrans[j][i] = r->cfa.getColorAt(i % 6, j % 6);
+          }
+      }
     }
 
-    // also include used override in orient:
-    const int orientation = dt_image_orientation(img);
-    img->width  = (orientation & 4) ? r->dim.y : r->dim.x;
-    img->height = (orientation & 4) ? r->dim.x : r->dim.y;
+    void *buf = dt_mipmap_cache_alloc(mbuf, img);
+    if(!buf) return DT_IMAGEIO_CACHE_FULL;
 
-    void *buf = dt_mipmap_cache_alloc(img, DT_MIPMAP_FULL, a);
-    if(!buf)
-      return DT_IMAGEIO_CACHE_FULL;
-
-    dt_imageio_flip_buffers((char *)buf, (char *)r->getData(), r->getBpp(), r->dim.x, r->dim.y, r->dim.x, r->dim.y, r->pitch, orientation);
+    /*
+     * since we do not want to crop black borders at this stage,
+     * and we do not want to rotate image, we can just use memcpy,
+     * as it is faster than dt_imageio_flip_buffers, but only if
+     * buffer sizes are equal,
+     * (from Klaus: r->pitch may differ from DT pitch (line to line spacing))
+     * else fallback to generic dt_imageio_flip_buffers()
+     */
+    const size_t bufSize_mipmap = (size_t)img->width * img->height * r->getBpp();
+    const size_t bufSize_rawspeed = (size_t)r->pitch * dimUncropped.y;
+    if(bufSize_mipmap == bufSize_rawspeed)
+    {
+      memcpy(buf, r->getDataUncropped(0, 0), bufSize_mipmap);
+    }
+    else
+    {
+      dt_imageio_flip_buffers((char *)buf, (char *)r->getDataUncropped(0, 0), r->getBpp(), dimUncropped.x,
+                              dimUncropped.y, dimUncropped.x, dimUncropped.y, r->pitch, ORIENTATION_NONE);
+    }
   }
-  catch (...)
+  catch(const std::exception &exc)
   {
-    /* if an exception is rasied lets not retry or handle the
+    printf("[rawspeed] (%s) %s\n", img->filename, exc.what());
+
+    /* if an exception is raised lets not retry or handle the
      specific ones, consider the file as corrupted */
+    return DT_IMAGEIO_FILE_CORRUPTED;
+  }
+  catch(...)
+  {
+    printf("Unhandled exception in imageio_rawspeed\n");
     return DT_IMAGEIO_FILE_CORRUPTED;
   }
 
   return DT_IMAGEIO_OK;
 }
 
-dt_imageio_retval_t
-dt_imageio_open_rawspeed_sraw(dt_image_t *img, RawImage r, dt_mipmap_cache_allocator_t a)
+dt_imageio_retval_t dt_imageio_open_rawspeed_sraw(dt_image_t *img, RawImage r, dt_mipmap_buffer_t *mbuf)
 {
   // sraw aren't real raw, but not ldr either (need white balance and stuff)
   img->flags &= ~DT_IMAGE_LDR;
   img->flags &= ~DT_IMAGE_RAW;
 
-  const int orientation = dt_image_orientation(img);
-  img->width  = (orientation & 4) ? r->dim.y : r->dim.x;
-  img->height = (orientation & 4) ? r->dim.x : r->dim.y;
-
-  int raw_width = r->dim.x;
-  int raw_height = r->dim.y;
-
-  // work around 50D bug
-  char makermodel[1024];
-  dt_colorspaces_get_makermodel(makermodel, 1024, img->exif_maker, img->exif_model);
-  bool is_50d = !strncmp(makermodel, "Canon EOS 50D", 13);
-  int raw_width_extra = (is_50d && r->subsampling.y == 2) ? 72 : 0;
+  img->width = r->dim.x;
+  img->height = r->dim.y;
 
   // actually we want to store full floats here:
-  img->bpp = 4*sizeof(float);
-  void *buf = dt_mipmap_cache_alloc(img, DT_MIPMAP_FULL, a);
-  if(!buf)
-    return DT_IMAGEIO_CACHE_FULL;
+  img->buf_dsc.channels = 4;
+  img->buf_dsc.datatype = TYPE_FLOAT;
 
-  int black = r->blackLevel;
-  int white = r->whitePoint;
+  if(r->getDataType() != TYPE_USHORT16) return DT_IMAGEIO_FILE_CORRUPTED;
 
-  ushort16* raw_img = (ushort16*)r->getData();
+  const uint32_t cpp = r->getCpp();
+  if(cpp != 1 && cpp != 3 && cpp != 4) return DT_IMAGEIO_FILE_CORRUPTED;
 
-#if 0
-  dt_imageio_flip_buffers_ui16_to_float(buf, raw_img, black, white, 3, raw_width, raw_height,
-                                        raw_width, raw_height, raw_width + raw_width_extra, orientation);
-#else
+  void *buf = dt_mipmap_cache_alloc(mbuf, img);
+  if(!buf) return DT_IMAGEIO_CACHE_FULL;
 
-  // TODO - OMPize this.
-  float scale = 1.0 / (white - black);
-  for( int row = 0; row < raw_height; ++row )
-    for( int col = 0; col < raw_width; ++col )
-      for( int k = 0; k < 3; ++k )
-        ((float *)buf)[4 * dt_imageio_write_pos(col, row, raw_width, raw_height, raw_width, raw_height, orientation) + k] =
-          ((float)raw_img[row*(raw_width + raw_width_extra)*3 + col*3 + k] - black) * scale;
+  if(cpp == 1)
+  {
+/*
+ * monochrome image (e.g. Leica M9 monochrom),
+ * we need to copy data from only channel to each of 3 channels
+ */
+
+#ifdef _OPENMP
+#pragma omp parallel for default(none) schedule(static) shared(r, img, buf)
 #endif
+    for(int j = 0; j < img->height; j++)
+    {
+      const uint16_t *in = (uint16_t *) r->getData(0, j);
+      float *out = ((float *)buf) + (size_t)4 * j * img->width;
+
+      for(int i = 0; i < img->width; i++, in += cpp, out += 4)
+      {
+        for(int k = 0; k < 3; k++)
+        {
+          out[k] = (float)*in / (float)UINT16_MAX;
+        }
+      }
+    }
+  }
+  else if(cpp == 3 || cpp == 4)
+  {
+/*
+ * standard 3-ch image
+ * just copy 3 ch to 3 ch
+ */
+
+#ifdef _OPENMP
+#pragma omp parallel for default(none) schedule(static) shared(r, img, buf)
+#endif
+    for(int j = 0; j < img->height; j++)
+    {
+      const uint16_t *in = (uint16_t *) r->getData(0, j);
+      float *out = ((float *)buf) + (size_t)4 * j * img->width;
+
+      for(int i = 0; i < img->width; i++, in += cpp, out += 4)
+      {
+        for(int k = 0; k < 3; k++)
+        {
+          out[k] = (float)in[k] / (float)UINT16_MAX;
+        }
+      }
+    }
+  }
 
   return DT_IMAGEIO_OK;
 }
 
-#endif
-
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
-// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

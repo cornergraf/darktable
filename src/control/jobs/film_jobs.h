@@ -15,22 +15,15 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
-#ifndef DT_CONTROL_JOBS_FILM_H
-#define DT_CONTROL_JOBS_FILM_H
 
-#include <inttypes.h>
+#pragma once
+
+#include "common/film.h"
 #include "control/control.h"
+#include <inttypes.h>
 
-typedef struct dt_film_import1_t
-{
-  dt_film_t *film;
-}
-dt_film_import1_t;
+dt_job_t *dt_film_import1_create(dt_film_t *film);
 
-int32_t dt_film_import1_run(dt_job_t *job);
-void dt_film_import1_init(dt_job_t *job, dt_film_t *film);
-
-#endif
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
-// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

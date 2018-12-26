@@ -18,28 +18,32 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <stdlib.h>
-#include <math.h>
 #include <assert.h>
+#include <math.h>
+#include <stdlib.h>
 #include <string.h>
-#ifdef HAVE_GEGL
-#include <gegl.h>
-#endif
-#include "iop/gamma.h"
-#include "develop/develop.h"
+
+#include "common/colorspaces_inline_conversions.h"
 #include "control/control.h"
+#include "develop/develop.h"
 #include "gui/accelerators.h"
 #include "gui/gtk.h"
+#include "iop/iop_api.h"
 
-DT_MODULE(1)
+DT_MODULE_INTROSPECTION(1, dt_iop_gamma_params_t)
+
+
+typedef struct dt_iop_gamma_params_t
+{
+  float gamma, linear;
+} dt_iop_gamma_params_t;
 
 const char *name()
 {
   return C_("modulename", "gamma");
 }
 
-int
-groups ()
+int groups()
 {
   return IOP_GROUP_COLOR;
 }
@@ -49,29 +53,210 @@ int flags()
   return IOP_FLAGS_HIDDEN | IOP_FLAGS_ONE_INSTANCE;
 }
 
-void process (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, void *i, void *o, const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out)
+static inline float Hue_2_RGB(float v1, float v2, float vH)
 {
-  dt_iop_gamma_data_t *d = (dt_iop_gamma_data_t *)piece->data;
+  if(vH < 0.0f) vH += 1.0f;
+  if(vH > 1.0f) vH -= 1.0f;
+  if((6.0f * vH) < 1.0f) return (v1 + (v2 - v1) * 6.0f * vH);
+  if((2.0f * vH) < 1.0f) return (v2);
+  if((3.0f * vH) < 2.0f) return (v1 + (v2 - v1) * ((2.0f / 3.0f) - vH) * 6.0f);
+  return v1;
+}
+
+static inline void HSL_2_RGB(const float *HSL, float *RGB)
+{
+  float H = HSL[0];
+  float S = HSL[1];
+  float L = HSL[2];
+
+  float var_1, var_2;
+
+  if(S < 1e-6f)
+  {
+    RGB[0] = RGB[1] = RGB[2] = L;
+  }
+  else
+  {
+    if(L < 0.5f)
+      var_2 = L * (1.0f + S);
+    else
+      var_2 = (L + S) - (S * L);
+
+    var_1 = 2.0f * L - var_2;
+
+    RGB[0] = Hue_2_RGB(var_1, var_2, H + (1.0f / 3.0f));
+    RGB[1] = Hue_2_RGB(var_1, var_2, H);
+    RGB[2] = Hue_2_RGB(var_1, var_2, H - (1.0f / 3.0f));
+  }
+}
+
+static inline void LCH_2_Lab(const float *LCH, float *Lab)
+{
+  Lab[0] = LCH[0];
+  Lab[1] = cosf(2.0f * M_PI * LCH[2]) * LCH[1];
+  Lab[2] = sinf(2.0f * M_PI * LCH[2]) * LCH[1];
+}
+
+static inline void LCH_2_RGB(const float *LCH, float *RGB)
+{
+  float Lab[3], XYZ[3];
+  LCH_2_Lab(LCH, Lab);
+  dt_Lab_to_XYZ(Lab, XYZ);
+  dt_XYZ_to_sRGB_clipped(XYZ, RGB);
+}
+
+static inline void Lab_2_RGB(const float *Lab, float *RGB)
+{
+  float XYZ[3];
+  dt_Lab_to_XYZ(Lab, XYZ);
+  dt_XYZ_to_sRGB_clipped(XYZ, RGB);
+}
+
+static inline void false_color(float val, dt_dev_pixelpipe_display_mask_t channel, float *out)
+{
+  float in[3];
+
+  switch((channel & DT_DEV_PIXELPIPE_DISPLAY_ANY) & ~DT_DEV_PIXELPIPE_DISPLAY_OUTPUT)
+  {
+    case DT_DEV_PIXELPIPE_DISPLAY_L:
+      in[0] = val * 100.0f;
+      in[1] = 0.0f;
+      in[2] = 0.0f;
+      Lab_2_RGB(in, out);
+      break;
+    case DT_DEV_PIXELPIPE_DISPLAY_a:
+      in[0] = 80.0f;
+      in[1] = val * 256.0f - 128.0f;
+      in[2] = 0.0f;
+      Lab_2_RGB(in, out);
+      break;
+    case DT_DEV_PIXELPIPE_DISPLAY_b:
+      in[0] = 80.0f;
+      in[1] = 0.0f;
+      in[2] = val * 256.0f - 128.0f;
+      Lab_2_RGB(in, out);
+      break;
+    case DT_DEV_PIXELPIPE_DISPLAY_R:
+      out[0] = val;
+      out[1] = out[2] = 0.0f;
+      break;
+    case DT_DEV_PIXELPIPE_DISPLAY_G:
+      out[1] = val;
+      out[0] = out[2] = 0.0f;
+      break;
+    case DT_DEV_PIXELPIPE_DISPLAY_B:
+      out[2] = val;
+      out[0] = out[1] = 0.0f;
+      break;
+    case DT_DEV_PIXELPIPE_DISPLAY_LCH_C:
+      in[0] = 80.0f;
+      in[1] = val * 128.0f * sqrtf(2.0f);
+      in[2] = 0.9111f;
+      LCH_2_RGB(in, out);
+      break;
+    case DT_DEV_PIXELPIPE_DISPLAY_LCH_h:
+      in[0] = 50.0f;
+      in[1] = 0.25f * 128.0f * sqrtf(2.0f);
+      in[2] = val;
+      LCH_2_RGB(in, out);
+      break;
+    case DT_DEV_PIXELPIPE_DISPLAY_HSL_H:
+      in[0] = val;
+      in[1] = 1.0f;
+      in[2] = 0.5f;
+      HSL_2_RGB(in, out);
+      break;
+    case DT_DEV_PIXELPIPE_DISPLAY_HSL_S:
+      in[0] = 0.8333f;
+      in[1] = val;
+      in[2] = 0.5f;
+      HSL_2_RGB(in, out);
+      break;
+    case DT_DEV_PIXELPIPE_DISPLAY_HSL_l:
+      in[0] = 0.0f;
+      in[1] = 0.0f;
+      in[2] = val;
+      HSL_2_RGB(in, out);
+      break;
+    case DT_DEV_PIXELPIPE_DISPLAY_GRAY:
+    default:
+      out[0] = out[1] = out[2] = val;
+      break;
+  }
+}
+
+void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const i, void *const o,
+             const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
+{
   const int ch = piece->colors;
 
-  if(piece->pipe->mask_display)
+  const dt_dev_pixelpipe_display_mask_t mask_display = piece->pipe->mask_display;
+  char *str = dt_conf_get_string("channel_display");
+  const int fcolor = !strcmp(str, "false color");
+  g_free(str);
+
+  if((mask_display & DT_DEV_PIXELPIPE_DISPLAY_CHANNEL) && (mask_display & DT_DEV_PIXELPIPE_DISPLAY_ANY) && fcolor)
   {
     const float yellow[3] = { 1.0f, 1.0f, 0.0f };
 #ifdef _OPENMP
-    #pragma omp parallel for default(none) shared(roi_out, o, i, d) schedule(static)
+#pragma omp parallel for default(none) schedule(static)
 #endif
-    for(int k=0; k<roi_out->height; k++)
+    for(int k = 0; k < roi_out->height; k++)
     {
-      const float *in = ((float *)i) + ch*k*roi_out->width;
-      uint8_t *out = ((uint8_t *)o) + ch*k*roi_out->width;
-      for (int j=0; j<roi_out->width; j++,in+=ch,out+=ch)
+      const float *in = ((float *)i) + (size_t)ch * k * roi_out->width;
+      uint8_t *out = ((uint8_t *)o) + (size_t)ch * k * roi_out->width;
+      for(int j = 0; j < roi_out->width; j++, in += ch, out += ch)
       {
-        float gray = 0.3f*in[0] + 0.59f*in[1] + 0.11f*in[2];
-        float alpha = in[3];
-        for(int c=0; c<3; c++)
+        const float alpha = (mask_display & DT_DEV_PIXELPIPE_DISPLAY_MASK) ? in[3] : 0.0f;
+        float colors[3];
+        false_color(in[1], mask_display, colors);
+        for(int c = 0; c < 3; c++)
         {
-          float value = gray * (1.0f - alpha) + yellow[c] * alpha;
-          out[2-c] = d->table[(uint16_t)CLAMP((int)(0xfffful*value), 0, 0xffff)];
+          const float value = colors[c] * (1.0f - alpha) + yellow[c] * alpha;
+          out[2 - c] = ((uint8_t)(CLAMP(((uint32_t)255.0f * value), 0x0, 0xff)));
+        }
+      }
+    }
+  }
+  else if((mask_display & DT_DEV_PIXELPIPE_DISPLAY_CHANNEL) && (mask_display & DT_DEV_PIXELPIPE_DISPLAY_ANY))
+  {
+    const float yellow[3] = { 1.0f, 1.0f, 0.0f };
+#ifdef _OPENMP
+#pragma omp parallel for default(none) schedule(static)
+#endif
+    for(int k = 0; k < roi_out->height; k++)
+    {
+      const float *in = ((float *)i) + (size_t)ch * k * roi_out->width;
+      uint8_t *out = ((uint8_t *)o) + (size_t)ch * k * roi_out->width;
+      for(int j = 0; j < roi_out->width; j++, in += ch, out += ch)
+      {
+        float alpha = (mask_display & DT_DEV_PIXELPIPE_DISPLAY_MASK) ? in[3] : 0.0f;
+        for(int c = 0; c < 3; c++)
+        {
+          const float value = in[1] * (1.0f - alpha) + yellow[c] * alpha;
+          out[2 - c] = ((uint8_t)(CLAMP(((uint32_t)255.0f * value), 0x0, 0xff)));
+        }
+      }
+    }
+  }
+  else if(mask_display & DT_DEV_PIXELPIPE_DISPLAY_MASK)
+  {
+    const float yellow[3] = { 1.0f, 1.0f, 0.0f };
+#ifdef _OPENMP
+#pragma omp parallel for default(none) schedule(static)
+#endif
+    for(int k = 0; k < roi_out->height; k++)
+    {
+      const float *in = ((float *)i) + (size_t)ch * k * roi_out->width;
+      uint8_t *out = ((uint8_t *)o) + (size_t)ch * k * roi_out->width;
+      for(int j = 0; j < roi_out->width; j++, in += ch, out += ch)
+      {
+        const float gray = 0.3f * in[0] + 0.59f * in[1] + 0.11f * in[2];
+        const float alpha = in[3];
+        for(int c = 0; c < 3; c++)
+        {
+          const float value = gray * (1.0f - alpha) + yellow[c] * alpha;
+          out[2 - c] = ((uint8_t)(CLAMP(((uint32_t)255.0f * value), 0x0, 0xff)));
         }
       }
     }
@@ -79,101 +264,34 @@ void process (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, void 
   else
   {
 #ifdef _OPENMP
-    #pragma omp parallel for default(none) shared(roi_out, o, i, d) schedule(static)
+#pragma omp parallel for default(none) schedule(static)
 #endif
-    for(int k=0; k<roi_out->height; k++)
+    for(int k = 0; k < roi_out->height; k++)
     {
-      const float *in = ((float *)i) + ch*k*roi_out->width;
-      uint8_t *out = ((uint8_t *)o) + ch*k*roi_out->width;
-      for (int j=0; j<roi_out->width; j++,in+=ch,out+=ch)
+      const float *in = ((float *)i) + (size_t)ch * k * roi_out->width;
+      uint8_t *out = ((uint8_t *)o) + (size_t)ch * k * roi_out->width;
+      for(int j = 0; j < roi_out->width; j++, in += ch, out += ch)
       {
-        for(int c=0; c<3; c++)
-          out[2-c] = d->table[(uint16_t)CLAMP((int)(0xfffful*in[c]), 0, 0xffff)];
+        for(int c = 0; c < 3; c++) out[2 - c] = ((uint8_t)(CLAMP(((uint32_t)255.0f * in[c]), 0x0, 0xff)));
       }
     }
   }
 }
 
-void commit_params (struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
-{
-  dt_iop_gamma_params_t *p = (dt_iop_gamma_params_t *)p1;
-#ifdef HAVE_GEGL
-  // pull in new params to gegl
-  gegl_node_set(piece->input, "linear_value", p->linear, "gamma_value", p->gamma, NULL);
-  // gegl_node_set(piece->input, "value", p->gamma, NULL);
-#else
-  // build gamma table in pipeline piece from committed params:
-  dt_iop_gamma_data_t *d = (dt_iop_gamma_data_t *)piece->data;
-  float a, b, c, g;
-  if(p->linear<1.0)
-  {
-    g = p->gamma*(1.0-p->linear)/(1.0-p->gamma*p->linear);
-    a = 1.0/(1.0+p->linear*(g-1));
-    b = p->linear*(g-1)*a;
-    c = powf(a*p->linear+b, g)/p->linear;
-  }
-  else
-  {
-    a = b = g = 0.0;
-    c = 1.0;
-  }
-  for(int k=0; k<0x10000; k++)
-  {
-    int32_t tmp;
-    if (k<0x10000*p->linear) tmp = MIN(c*k, 0xFFFF);
-    else tmp = MIN(powf(a*k/0x10000+b, g)*0x10000, 0xFFFF);
-    d->table[k] = tmp>>8;
-  }
-#endif
-}
-
-void init_pipe (struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
-{
-#ifdef HAVE_GEGL
-  // create part of the gegl pipeline
-  piece->data = NULL;
-  dt_iop_gamma_params_t *default_params = (dt_iop_gamma_params_t *)self->default_params;
-  piece->input = piece->output = gegl_node_new_child(pipe->gegl, "operation", "gegl:dt-gamma", "linear_value", default_params->linear, "gamma_value", default_params->gamma, NULL);
-  // piece->input = piece->output = gegl_node_new_child(pipe->gegl, "operation", "gegl:gamma", "value", default_params->gamma, NULL);
-#else
-  piece->data = malloc(sizeof(dt_iop_gamma_data_t));
-  self->commit_params(self, self->default_params, pipe, piece);
-#endif
-}
-
-void cleanup_pipe (struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
-{
-#ifdef HAVE_GEGL
-  // clean up everything again.
-  (void)gegl_node_remove_child(pipe->gegl, piece->input);
-  // no free necessary, no data is alloc'ed
-#else
-  free(piece->data);
-#endif
-}
-
 void init(dt_iop_module_t *module)
 {
   // module->data = malloc(sizeof(dt_iop_gamma_data_t));
-  module->params = malloc(sizeof(dt_iop_gamma_params_t));
-  module->default_params = malloc(sizeof(dt_iop_gamma_params_t));
+  module->params = calloc(1, sizeof(dt_iop_gamma_params_t));
+  module->default_params = calloc(1, sizeof(dt_iop_gamma_params_t));
   module->params_size = sizeof(dt_iop_gamma_params_t);
   module->gui_data = NULL;
   module->priority = 1000; // module order created by iop_dependencies.py, do not edit!
   module->hide_enable_button = 1;
   module->default_enabled = 1;
-  dt_iop_gamma_params_t tmp = (dt_iop_gamma_params_t)
-  {
-    1.0, 1.0
-  };
-  memcpy(module->params, &tmp, sizeof(dt_iop_gamma_params_t));
-  memcpy(module->default_params, &tmp, sizeof(dt_iop_gamma_params_t));
 }
 
 void cleanup(dt_iop_module_t *module)
 {
-  free(module->gui_data);
-  module->gui_data = NULL;
   free(module->params);
   module->params = NULL;
 }
@@ -181,4 +299,4 @@ void cleanup(dt_iop_module_t *module)
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
-// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

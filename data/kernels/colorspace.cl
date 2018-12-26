@@ -1,4 +1,21 @@
+/*
+    This file is part of darktable,
+    copyright (c) 2009--2012 johannes hanika.
+    copyright (c) 2011--2013 Ulrich Pegelow
 
+    darktable is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    darktable is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with darktable.  If not, see <http://www.gnu.org/licenses/>.
+*/
 
 float4 Lab_2_LCH(float4 Lab)
 {
@@ -13,7 +30,6 @@ float4 Lab_2_LCH(float4 Lab)
 }
 
 
-
 float4 LCH_2_Lab(float4 LCH)
 {
   float L = LCH.x;
@@ -23,14 +39,45 @@ float4 LCH_2_Lab(float4 LCH)
   return (float4)(L, a, b, LCH.w);
 }
 
+float cbrt_5f(float f)
+{
+  union { float f; unsigned int i; } p;
+  p.f = f;
+  p.i = p.i / 3 + 709921077;
+  return p.f;
+}
+
+float cbrta_halleyf(float a, float R)
+{
+  const float a3 = a * a * a;
+  const float b = a * (a3 + R + R) / (a3 + a3 + R);
+  return b;
+}
+
+float lab_f(float x)
+{
+  const float epsilon = 216.0f / 24389.0f;
+  const float kappa = 24389.0f / 27.0f;
+  if(x > epsilon)
+  {
+    // approximate cbrtf(x):
+    const float a = cbrt_5f(x);
+    return cbrta_halleyf(a, x);
+  }
+  else
+    return (kappa * x + 16.0f) / 116.0f;
+}
+
 
 float4 XYZ_to_Lab(float4 xyz)
 {
   float4 lab;
-
-  xyz.x *= (1.0f/0.9642f);
-  xyz.z *= (1.0f/0.8242f);
-  xyz = (xyz > (float4)0.008856f) ? native_powr(xyz, (float4)1.0f/3.0f) : 7.787f*xyz + (float4)(16.0f/116.0f);
+  const float4 d50 = (float4)(0.9642f, 1.0f, 0.8249f, 1.0f);
+  
+  xyz /= d50;
+  xyz.x = lab_f(xyz.x);
+  xyz.y = lab_f(xyz.y);
+  xyz.z = lab_f(xyz.z);
   lab.x = 116.0f * xyz.y - 16.0f;
   lab.y = 500.0f * (xyz.x - xyz.y);
   lab.z = 200.0f * (xyz.y - xyz.z);
@@ -59,6 +106,57 @@ float4 Lab_to_XYZ(float4 Lab)
   return XYZ;
 }
 
+float4 prophotorgb_to_XYZ(float4 rgb)
+{
+  const float rgb_to_xyz[3][3] = { // prophoto rgb
+    {0.7976749f, 0.1351917f, 0.0313534f},
+    {0.2880402f, 0.7118741f, 0.0000857f},
+    {0.0000000f, 0.0000000f, 0.8252100f},
+  };
+  float4 XYZ = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
+  XYZ.x += rgb_to_xyz[0][0] * rgb.x;
+  XYZ.x += rgb_to_xyz[0][1] * rgb.y;
+  XYZ.x += rgb_to_xyz[0][2] * rgb.z;
+  XYZ.y += rgb_to_xyz[1][0] * rgb.x;
+  XYZ.y += rgb_to_xyz[1][1] * rgb.y;
+  XYZ.y += rgb_to_xyz[1][2] * rgb.z;
+  XYZ.z += rgb_to_xyz[2][0] * rgb.x;
+  XYZ.z += rgb_to_xyz[2][1] * rgb.y;
+  XYZ.z += rgb_to_xyz[2][2] * rgb.z;
+  return XYZ;
+}
+
+float4 XYZ_to_prophotorgb(float4 XYZ)
+{
+  const float xyz_to_rgb[3][3] = { // prophoto rgb d50
+    { 1.3459433f, -0.2556075f, -0.0511118f},
+    {-0.5445989f,  1.5081673f,  0.0205351f},
+    { 0.0000000f,  0.0000000f,  1.2118128f},
+  };
+  float4 rgb = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
+  rgb.x += xyz_to_rgb[0][0] * XYZ.x;
+  rgb.x += xyz_to_rgb[0][1] * XYZ.y;
+  rgb.x += xyz_to_rgb[0][2] * XYZ.z;
+  rgb.y += xyz_to_rgb[1][0] * XYZ.x;
+  rgb.y += xyz_to_rgb[1][1] * XYZ.y;
+  rgb.y += xyz_to_rgb[1][2] * XYZ.z;
+  rgb.z += xyz_to_rgb[2][0] * XYZ.x;
+  rgb.z += xyz_to_rgb[2][1] * XYZ.y;
+  rgb.z += xyz_to_rgb[2][2] * XYZ.z;
+  return rgb;
+}
+
+float4 Lab_to_prophotorgb(float4 Lab)
+{
+  float4 XYZ = Lab_to_XYZ(Lab);
+  return XYZ_to_prophotorgb(XYZ);
+}
+
+float4 prophotorgb_to_Lab(float4 rgb)
+{
+  float4 XYZ = prophotorgb_to_XYZ(rgb);
+  return XYZ_to_Lab(XYZ);
+}
 
 float4 RGB_2_HSL(const float4 RGB)
 {
@@ -75,7 +173,7 @@ float4 RGB_2_HSL(const float4 RGB)
 
   L = (var_Max + var_Min) / 2.0f;
 
-  if (del_Max == 0.0f)
+  if (del_Max < 1e-6f)
   {
     H = 0.0f;
     S = 0.0f;
@@ -114,7 +212,6 @@ float Hue_2_RGB(float v1, float v2, float vH)
 
 
 
-
 float4 HSL_2_RGB(const float4 HSL)
 {
   float R, G, B;
@@ -125,7 +222,7 @@ float4 HSL_2_RGB(const float4 HSL)
 
   float var_1, var_2;
 
-  if (S == 0.0f)
+  if (S < 1e-6f)
   {
     R = B = G = L;
   }
@@ -144,3 +241,112 @@ float4 HSL_2_RGB(const float4 HSL)
   // returns RGB scaled to [0; 1] for each channel
   return (float4)(R, G, B, HSL.w);
 }
+
+float4 RGB_2_HSV(const float4 RGB)
+{
+  float4 HSV;
+
+  float minv = fmin(RGB.x, fmin(RGB.y, RGB.z));
+  float maxv = fmax(RGB.x, fmax(RGB.y, RGB.z));
+  float delta = maxv - minv;
+
+  HSV.z = maxv;
+  HSV.w = RGB.w;
+
+  if (fabs(maxv) > 1e-6f && fabs(delta) > 1e-6f)
+  { 
+    HSV.y = delta / maxv;
+  }
+  else
+  {
+    HSV.x = 0.0f;
+    HSV.y = 0.0f;
+    return HSV;
+  }
+
+  if (RGB.x == maxv)
+   HSV.x = (RGB.y - RGB.z) / delta;
+  else if (RGB.y == maxv)
+   HSV.x = 2.0f + (RGB.z - RGB.x) / delta;
+  else
+   HSV.x = 4.0f + (RGB.x - RGB.y) / delta;
+
+  HSV.x /= 6.0f;
+
+  if(HSV.x < 0)
+    HSV.x += 1.0f;
+
+  return HSV;
+}
+
+float4 HSV_2_RGB(const float4 HSV)
+{
+  float4 RGB;
+
+  if (fabs(HSV.y) < 1e-6f)
+  {
+    RGB.x = RGB.y = RGB.z = HSV.z;
+    RGB.w = HSV.w;
+    return RGB;
+  }
+
+  int i = floor(6.0f*HSV.x);
+  float v = HSV.z;
+  float w = HSV.w;
+  float p = v * (1.0f - HSV.y);
+  float q = v * (1.0f - HSV.y * (6.0f*HSV.x - i));
+  float t = v * (1.0f - HSV.y * (1.0f - (6.0f*HSV.x - i)));
+
+  switch (i)
+  {
+    case 0:
+      RGB = (float4)(v, t, p, w);
+      break;
+    case 1:
+      RGB = (float4)(q, v, p, w);
+      break;
+    case 2:
+      RGB = (float4)(p, v, t, w);
+      break;
+    case 3:
+      RGB = (float4)(p, q, v, w);
+      break;
+    case 4:
+      RGB = (float4)(t, p, v, w);
+      break;
+    case 5:
+    default:
+      RGB = (float4)(v, p, q, w);
+      break;
+  }
+  return RGB;
+}
+
+
+// XYZ -> sRGB matrix, D65
+float4 XYZ_to_sRGB(float4 XYZ)
+{
+  float4 sRGB;
+
+  sRGB.x =  3.1338561f * XYZ.x - 1.6168667f * XYZ.y - 0.4906146f * XYZ.z;
+  sRGB.y = -0.9787684f * XYZ.x + 1.9161415f * XYZ.y + 0.0334540f * XYZ.z;
+  sRGB.z =  0.0719453f * XYZ.x - 0.2289914f * XYZ.y + 1.4052427f * XYZ.z;
+  sRGB.w = XYZ.w;
+
+  return sRGB;
+}
+
+
+// sRGB -> XYZ matrix, D65
+float4 sRGB_to_XYZ(float4 sRGB)
+{
+  float4 XYZ;
+
+  XYZ.x = 0.4360747f * sRGB.x + 0.3850649f * sRGB.y + 0.1430804f * sRGB.z;
+  XYZ.y = 0.2225045f * sRGB.x + 0.7168786f * sRGB.y + 0.0606169f * sRGB.z;
+  XYZ.z = 0.0139322f * sRGB.x + 0.0971045f * sRGB.y + 0.7141733f * sRGB.z;
+  XYZ.w = sRGB.w;
+
+  return XYZ;
+}
+

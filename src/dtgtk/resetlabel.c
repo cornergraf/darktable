@@ -18,26 +18,24 @@
 
 #include "dtgtk/resetlabel.h"
 
-static void _reset_label_class_init (GtkDarktableResetLabelClass *klass);
-static void _reset_label_init (GtkDarktableResetLabel *label);
+static void _reset_label_class_init(GtkDarktableResetLabelClass *klass);
+static void _reset_label_init(GtkDarktableResetLabel *label);
 
 
-static void
-_reset_label_class_init (GtkDarktableResetLabelClass *klass)
+static void _reset_label_class_init(GtkDarktableResetLabelClass *klass)
 {
 }
 
-static void
-_reset_label_init(GtkDarktableResetLabel *label)
+static void _reset_label_init(GtkDarktableResetLabel *label)
 {
 }
 
-static gboolean
-_reset_label_callback(GtkDarktableResetLabel *label, GdkEventButton *event, gpointer user_data)
+static gboolean _reset_label_callback(GtkDarktableResetLabel *label, GdkEventButton *event, gpointer user_data)
 {
   if(event->type == GDK_2BUTTON_PRESS)
   {
-    memcpy(((char *)label->module->params) + label->offset, ((char *)label->module->default_params) + label->offset, label->size);
+    memcpy(((char *)label->module->params) + label->offset,
+           ((char *)label->module->default_params) + label->offset, label->size);
     label->module->gui_update(label->module);
     dt_dev_add_history_item(darktable.develop, label->module, FALSE);
     return TRUE;
@@ -46,19 +44,18 @@ _reset_label_callback(GtkDarktableResetLabel *label, GdkEventButton *event, gpoi
 }
 
 // public functions
-GtkWidget*
-dtgtk_reset_label_new (const gchar *text, dt_iop_module_t *module, void *param, int param_size)
+GtkWidget *dtgtk_reset_label_new(const gchar *text, dt_iop_module_t *module, void *param, int param_size)
 {
   GtkDarktableResetLabel *label;
-  label = gtk_type_new (dtgtk_reset_label_get_type());
+  label = g_object_new(dtgtk_reset_label_get_type(), NULL);
   label->module = module;
   label->offset = param - (void *)module->params;
   label->size = param_size;
 
   label->lb = GTK_LABEL(gtk_label_new(text));
-  gtk_misc_set_alignment(GTK_MISC(label->lb), 0.0, 0.5);
+  gtk_widget_set_halign(GTK_WIDGET(label->lb), GTK_ALIGN_START);
   gtk_event_box_set_visible_window(GTK_EVENT_BOX(label), FALSE);
-  g_object_set(G_OBJECT(label), "tooltip-text", _("double-click to reset"), (char *)NULL);
+  gtk_widget_set_tooltip_text(GTK_WIDGET(label), _("double-click to reset"));
   gtk_container_add(GTK_CONTAINER(label), GTK_WIDGET(label->lb));
   gtk_widget_add_events(GTK_WIDGET(label), GDK_BUTTON_PRESS_MASK);
   g_signal_connect(G_OBJECT(label), "button-press-event", G_CALLBACK(_reset_label_callback), (gpointer)NULL);
@@ -66,33 +63,29 @@ dtgtk_reset_label_new (const gchar *text, dt_iop_module_t *module, void *param, 
   return (GtkWidget *)label;
 }
 
-GtkType dtgtk_reset_label_get_type()
+GType dtgtk_reset_label_get_type()
 {
-  static GtkType dtgtk_reset_label_type = 0;
-  if (!dtgtk_reset_label_type)
+  static GType dtgtk_reset_label_type = 0;
+  if(!dtgtk_reset_label_type)
   {
-    static const GtkTypeInfo dtgtk_reset_label_info =
-    {
-      "GtkDarktableResetLabel",
-      sizeof(GtkDarktableResetLabel),
-      sizeof(GtkDarktableResetLabelClass),
-      (GtkClassInitFunc) _reset_label_class_init,
-      (GtkObjectInitFunc) _reset_label_init,
-      NULL,
-      NULL,
-      (GtkClassInitFunc) NULL
+    static const GTypeInfo dtgtk_reset_label_info = {
+      sizeof(GtkDarktableResetLabelClass), (GBaseInitFunc)NULL, (GBaseFinalizeFunc)NULL,
+      (GClassInitFunc)_reset_label_class_init, NULL, /* class_finalize */
+      NULL,                                          /* class_data */
+      sizeof(GtkDarktableResetLabel), 0,             /* n_preallocs */
+      (GInstanceInitFunc)_reset_label_init,
     };
-    dtgtk_reset_label_type = gtk_type_unique (GTK_TYPE_EVENT_BOX, &dtgtk_reset_label_info);
+    dtgtk_reset_label_type
+        = g_type_register_static(GTK_TYPE_EVENT_BOX, "GtkDarktableResetLabel", &dtgtk_reset_label_info, 0);
   }
   return dtgtk_reset_label_type;
 }
 
-void
-dtgtk_reset_label_set_text(GtkDarktableResetLabel *label, const gchar *str)
+void dtgtk_reset_label_set_text(GtkDarktableResetLabel *label, const gchar *str)
 {
   gtk_label_set_text(label->lb, str);
 }
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
-// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

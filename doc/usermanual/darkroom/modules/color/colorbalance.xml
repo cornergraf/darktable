@@ -1,0 +1,108 @@
+<!DOCTYPE sect3 PUBLIC "-//OASIS//DTD DocBook XML V4.5//EN"
+               "http://www.oasis-open.org/docbook/xml/4.5/docbookx.dtd" [
+		<!ENTITY % darktable_dtd SYSTEM "../../../dtd/darktable.dtd">
+		%darktable_dtd;
+		]>
+<sect3 status="final" id="color_balance">
+
+  <title>Color balance</title>
+
+  <indexterm>
+    <primary>modules</primary>
+    <secondary>color balance</secondary>
+  </indexterm>
+
+  <indexterm>
+    <primary>color balance</primary>
+  </indexterm>
+
+  <sect4>
+
+    <title>Overview</title>
+
+    <informaltable frame="none">
+      <tgroup cols="2" colsep="0" rowsep="0">
+        <colspec colwidth="6*"/>
+        <colspec colwidth="4*"/>
+        <tbody>
+          <row>
+            <entry>
+              This module offers a versatile tool for adjusting an image's color balance.
+            </entry>
+            <entry>
+              <graphic fileref="darkroom/modules/images/colorbalance.png" scalefit="1" width="80%" align="center" />
+            </entry>
+          </row>
+        </tbody>
+      </tgroup>
+    </informaltable>
+
+  </sect4>
+
+  <sect4>
+
+    <title>Usage</title>
+
+    <para>
+      For each of the three primary colors&nbsp;&ndash; red, green, and blue&nbsp;&ndash; there
+      are three sliders <quote>lift</quote>, <quote>gamma</quote> and <quote>gain</quote> to
+      control dark tones, mid tones and high tones, respectively. Changing these parameters adds
+      offsets to the individual RGB channels and influences the color balance of the image.
+    </para>
+
+    <para>
+      Additional <quote>factor</quote> sliders act on all colors at once. Their effect is
+      similar to the controls of the <emphasis>levels</emphasis> module (see
+      <xref linkend="levels"/>).
+    </para>
+
+    <para>
+      The way to best envision the module's way of working is if you consider
+      <quote>lift</quote>, <quote>gamma</quote> and <quote>gain</quote> as parameters
+      influencing the properties of a tone curve which&nbsp;&ndash; in its original
+      state&nbsp;&ndash; is a straight line going diagonally from bottom left to top right.
+    </para>
+
+    <para>
+      The lift parameter adjusts the left axis intercept of the line&nbsp;&ndash; this point can
+      be shifted from its default location with zero abscissa to points with negative or
+      positive ones. The gamma parameter modifies the line shape&nbsp;&ndash; the default shape
+      is linear and can be turned into a convex curve with increased or into a concave curve
+      with lowered gamma values. Finally, the gain parameter defines the steepness of the
+      curve&nbsp;&ndash; by default the curve runs diagonally, higher values lead to a steeper
+      curve and lower values to a flatter one.
+    </para>
+
+    <para>
+      Side note: although this module acts on RGB colors its location in pixelpipe puts it into
+      the Lab color space. Accordingly the modules converts from Lab to RGB, does its color
+      adjustments, and then converts back to Lab.
+    </para>
+
+    <sect5>
+      <title>lift</title>
+      <para>
+        Adjusts the value of dark colors with individual sliders for each RGB color and with a
+        <quote>factor</quote> slider acting on all three colors at once.
+      </para>
+    </sect5>
+
+    <sect5>
+      <title>gamma</title>
+      <para>
+        Adjusts the mid tones with individual sliders for each RGB color and with a
+        <quote>factor</quote> slider acting on all three colors at once.
+      </para>
+    </sect5>
+
+    <sect5>
+      <title>gain</title>
+      <para>
+        Adjusts the high tones with individual sliders for each RGB color and with a
+        <quote>factor</quote> slider acting on all three colors at once.
+      </para>
+    </sect5>
+
+  </sect4>
+
+</sect3>

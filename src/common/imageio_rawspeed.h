@@ -15,24 +15,29 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
-#ifdef HAVE_RAWSPEED
-#ifndef DT_IMAGEIO_RAWSPEED_H
-#define DT_IMAGEIO_RAWSPEED_H
+
+#pragma once
+
 #ifdef __cplusplus
-extern "C"
-{
+extern "C" {
 #endif
 
 #include "common/image.h"
 #include "common/mipmap_cache.h"
 
-  dt_imageio_retval_t dt_imageio_open_rawspeed(dt_image_t *img, const char *filename, dt_mipmap_cache_allocator_t a);
+void dt_rawspeed_lookup_makermodel(const char *maker, const char *model,
+                                   char *mk, int mk_len, char *md, int md_len,
+                                   char *al, int al_len);
+
+uint32_t dt_rawspeed_crop_dcraw_filters(uint32_t filters, uint32_t crop_x, uint32_t crop_y);
+
+dt_imageio_retval_t dt_imageio_open_rawspeed(dt_image_t *img, const char *filename,
+                                             dt_mipmap_buffer_t *buf);
 
 #ifdef __cplusplus
 }
 #endif
-#endif
-#endif
+
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
-// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

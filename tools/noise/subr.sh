@@ -2,6 +2,11 @@
 # General purpose functions.
 # --------------------------------------------------------------------
 
+color_ok=$'\033[32m'
+color_warning=$'\033[33m'
+color_error=$'\033[31m'
+color_reset=$'\033[0m'
+
 # The functions below can be used to set/get a variable with a variable
 # name. This can be useful to have something similar to a hash map.
 #
@@ -38,6 +43,27 @@ add_to_list() {
 	echo "$list"
 }
 
+# Handle various flavors of sed(1). This function is called at the end
+# of this file.
+
+set_sed_cmd() {
+	case "$(uname -s)" in
+	Linux)
+		sed="sed -r"
+		;;
+	*)
+		# For non-Linux systems, try with gsed(1) (common name
+		# for GNU sed), otherwise, try "sed -E" which may not
+		# exist everywhere.
+		if which gsed >/dev/null 2>&1; then
+			sed="gsed -r"
+		else
+			sed="sed -E"
+		fi
+		;;
+	esac
+}
+
 # Helper function to checkif a given command is available.
 #
 # Below this function, higher-level helpers which check for sets of
@@ -51,7 +77,7 @@ tool_installed() {
 
 	# If we already checked for this tool, return. This way, we
 	# don't display the message again.
-	var="tool_$(echo "$tool" | sed -r 's/[^a-zA-Z0-9_]+/_/g')"
+	var="tool_$(echo "$tool" | $sed 's/[^a-zA-Z0-9_]+/_/g')"
 	checked=$(get_var $var)
 	if [ "$checked" = "found" ]; then
 		return 0
@@ -62,7 +88,7 @@ tool_installed() {
 
 	if ! which $tool >/dev/null 2>&1; then
 		if [ "$message" ]; then
-			echo "ERROR: $tool not found" 1>&2
+			echo "${color_error}ERROR: $tool not found${color_reset}" 1>&2
 			printf "%s\n\n" "$message" 1>&2
 		fi
 
@@ -108,6 +134,16 @@ install this package and re-run this script."; then
 		missing_tool=1
 	fi
 
+	if ! convert --version >/dev/null 2>&1; then
+		cat 1>&2 <<EOF
+ImageMagick is required to check input images correctness. Please
+install this package and re-run this script.
+
+NOTE: You may have to remove GraphicsMagick-related packages before.
+EOF
+		missing_tool=1
+	fi
+
 	return $missing_tool
 }
 
@@ -126,6 +162,35 @@ required pictures."; then
 	if ! tool_installed awk "
 awk is needed to parse gphot2(1) output."; then
 		missing_tool=1
+	fi
+
+	return $missing_tool
+}
+
+pdf_tools_installed() {
+	local missing_tool
+	missing_tool=1
+
+	echo "--> Check for pdf tools availability"
+
+	if tool_installed pdftk; then
+		pdfcat() {
+			local output inputs
+			output=$1; shift
+			inputs=$@
+			pdftk $inputs cat output $output
+		}
+		missing_tool=0
+	elif tool_installed gs; then
+		pdfcat() {
+			local output inputs
+			output=$1; shift
+			inputs=$@
+			gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile=$output $inputs
+		}
+		missing_tool=0
+	else
+		echo "pdftk or ghoscript are needed if you want one single result pdf."
 	fi
 
 	return $missing_tool
@@ -153,50 +218,43 @@ of the presets. Please install this command and re-run this script."; then
 	return $missing_tool
 }
 
-database_tools_installed() {
-	local missing_tool
-	missing_tool=0
+get_darktable_version() {
+	local version
 
-	echo "--> Check for database tools availability"
+	version=$(darktable --version | head -n 1 | cut -d' ' -f 4)
 
-	if ! tool_installed sqlite3 "
-sqlite3 is required to prepare a database allowing you to test the
-generated presets. Please install this command and re-run this script."; then
-		missing_tool=1
-	fi
-
-	if ! tool_installed awk "
-awk is needed to prepare presets for database insertion."; then
-		missing_tool=1
-	fi
-
-	return $missing_tool
+	echo "$version"
 }
 
-internal_tools_available() {
-	local missing_tool
-	missing_tool=0
+normalize_darktable_version() {
+	local version
+	version=$1
 
-	echo "--> Check for internal tools availability"
+	version=${version%+*}
+	version=${version%~*}
 
-	if ! tool_installed make "
-make is required to build darktable tools dedicated to noise profiling.
-Please install this command and re-run this script."; then
-		missing_tool=1
-	fi
+	case "$version" in
+	*.*.*) ;;
+	*)     version="$version.0" ;;
+	esac
 
-	if ! tool_installed cc "
-A compilator (eg. gcc) is required to build darktable tools dedicated to
-noise profiling. Please install this command and re-run this script."; then
-		missing_tool=1
-	fi
+	IFS='.'
+	for i in $version; do
+		normalized="${normalized}$(printf "%03d" $i)"
+	done
 
-	if [ "$missing_tool" = "1" ]; then
-		return 1
-	fi
+	echo "$normalized"
+}
+cmp_darktable_version() {
+	local v1 v2 cmp
+	v1=$1
+	cmp=$2
+	v2=$3
 
-	echo "--> Build profiling tools"
-	make -C "$scriptdir"
+	v1=$(normalize_darktable_version "$v1")
+	v2=$(normalize_darktable_version "$v2")
+
+	test "$v1" "$cmp" "$v2"
 }
 
 # --------------------------------------------------------------------
@@ -222,6 +280,12 @@ get_image_iso() {
 	if [ -z "$iso" -o "$iso" = "65535" ]; then
 		iso=$(get_exif_key "$file" Exif.Photo.RecommendedExposureIndex)
 	fi
+	if [ -z "$iso" -o "$iso" = "65535" ]; then
+		iso=$(get_exif_key "$file" Exif.Photo.StandardOutputSensitivity)
+	fi
+	if [ -z "$iso" -o "$iso" = "65535" ]; then
+		iso=$(get_exif_key "$file" Exif.Image.ISOSpeedRatings)
+	fi
 
 	# Then try some brand specific values if still not found.
 
@@ -229,23 +293,33 @@ get_image_iso() {
 	# possibly talk with exiv2 developers to get an option that only
 	# displays the correct iso
 
-	if [ -z "$iso" ]; then
+	if [ -z "$iso" -o "$iso" = "0" ]; then
 		case "$(get_image_camera_maker "$1")" in
-		NIKON*)
+		[Nn][Ii][Kk][Oo][Nn]*)
 			# Read "Exif.Nikon3.*" before "Exif.NikonIi.*":
 			#     1. "Exif.NikonIi.*" are bytes, not even
 			#        shorts, so they're smaller than other
 			#        keys.
-			#     2. That looks like versionned nodes:
+			#     2. That looks like versioned nodes:
 			#        "Nikon2" vs. "Nikon3".
 			iso=$(get_exif_key "$file" Exif.Nikon3.ISOSpeed)
-			if [ -z "$iso" ]; then
+			if [ -z "$iso" -o "$iso" = "0" ]; then
 				iso=$(get_exif_key "$file" Exif.Nikon3.ISOSettings)
 			fi
-			if [ -z "$iso" ]; then
+			if [ -z "$iso" -o "$iso" = "0" ]; then
 				iso=$(get_exif_key "$file" Exif.NikonIi.ISO)
+				# read hi/low iso setting
+				ciso=$(echo $iso | cut -d' ' -f2)
+				if [ "$ciso" = "Hi" -o "$ciso" = "Lo" ]; then
+					iso=$(echo $iso  | cut -d' '  -f1 )
+				fi
 			fi
 			;;
+    [Cc][Aa][Nn][Oo][Nn]*)
+			if [ -z "$iso" -o "$iso" = "0" ]; then
+				iso=$(get_exif_key "$file" Exif.CanonSi.ISOSpeed)
+			fi
+      ;;
 		esac
 	fi
 
@@ -258,7 +332,13 @@ get_image_camera_maker() {
 
 	tool_installed exiv2
 
-	maker=$(get_exif_key "$file" Exif.Image.Make)
+	first_model=$(echo $(get_exif_key "$file" Exif.Image.Model) | cut -d " " -f 1)
+	if [ "$first_model" = "PENTAX" ]; then
+		maker="Pentax"
+	else
+	  maker=$(get_exif_key "$file" Exif.Image.Make)
+	  maker=$(echo $maker | cut -c 1)$(echo $maker | cut -c 2- | cut -d " " -f 1 | tr "[A-Z]" "[a-z]")
+	fi
 	echo $maker
 }
 
@@ -268,7 +348,12 @@ get_image_camera_model() {
 
 	tool_installed exiv2
 
+	first_maker=$(echo $(get_exif_key "$file" Exif.Image.Make) | cut -d " " -f 1)
 	model=$(get_exif_key "$file" Exif.Image.Model)
+	first_model=$(echo $model | cut -d " " -f 1)
+	if [ "$first_maker" = "$first_model" ] || [ "$first_model" = "PENTAX" ]; then
+		model=$(echo $model | cut -d " " -f 2-)
+	fi
 	echo $model
 }
 
@@ -295,8 +380,8 @@ auto_set_profiling_dir() {
 			return 0
 		else
 			cat <<EOF
-ERROR: Profiling directory doesn't exist:
-$profiling_dir
+${color_error}ERROR: Profiling directory doesn't exist:
+$profiling_dir${color_reset}
 EOF
 			return 1
 		fi
@@ -304,14 +389,14 @@ EOF
 
 	if ! camera_is_plugged; then
 		cat <<EOF
-ERROR: Please specify a directory to read or write profiling images
-(using the "$flag" flag) or plug your camera and turn it on.
+${color_error}ERROR: Please specify a directory to read or write profiling RAW images
+(using the "$flag" flag) or plug your camera and turn it on.${color_reset}
 EOF
 		return 1
 	fi
 
 	camera=$(get_camera_name)
-	subdir=$(echo $camera | sed -r 's/[^a-zA-Z0-9_]+/-/g')
+	subdir=$(echo $camera | $sed 's/[^a-zA-Z0-9_]+/-/g')
 	profiling_dir="/var/tmp/darktable-noise-profiling/$subdir/profiling"
 	test -d "$profiling_dir" || mkdir -p "$profiling_dir"
 }
@@ -325,7 +410,7 @@ list_input_images() {
 	local iso image images
 
 	echo
-	echo "===> List profiling input images"
+	echo "===> List profiling input RAW images"
 	for image in "$profiling_dir"/*; do
 		if [ "$image" = "$profiling_dir/*" ]; then
 			# Directory empty.
@@ -333,9 +418,9 @@ list_input_images() {
 		fi
 
 		case "$image" in
-		*.[jJ][pP][gG])
+		*.[Jj][Pp][Gg]|*.[Jj][Pp][Ee][Gg])
 			# Skip jpeg files, if any. Other files don't
-			# have Exif and will be skept automatically.
+			# have Exif and will be skipped automatically.
 			continue
 			;;
 		esac
@@ -387,28 +472,29 @@ export_thumbnail() {
 	convert "$input" -resize 1024x1024 "$output"
 }
 
-check_exposition() {
-	local orig input over under ret convert_flags
+check_exposure() {
+	local orig input inputdir over under ret convert_flags
 	orig=$1
 	input=$2
+	inputdir=$(dirname $input)
 
 	ret=0
 
 	# See: http://www.imagemagick.org/discourse-server/viewtopic.php?f=1&t=19805
-
-	convert_flags="-channel RGB -threshold 99% -separate -append"
+	# and https://www.imagemagick.org/script/architecture.php#tera-pixel for the temporary-path thing
+	convert_flags="-define registry:temporary-path=${inputdir}/tmp -channel RGB -threshold 99% -separate -append"
 
 	over=$(convert "$input" $convert_flags -format "%[mean]" info: | cut -f1 -d.)
 	if [ "$over" -a "$over" -lt 80 ]; then
 		# Image not over-exposed.
-		echo "\"$orig\" not over-exposed ($over)"
+		echo "${color_error}\"$orig\" not over-exposed ($over)${color_reset}"
 		ret=1
 	fi
 
 	under=$(convert "$input" -negate $convert_flags -format "%[mean]" info: | cut -f1 -d.)
 	if [ "$under" -a "$under" -lt 80 ]; then
 		# Image not under-exposed.
-		echo "\"$orig\" not under-exposed ($under)"
+		echo "${color_error}\"$orig\" not under-exposed ($under)${color_reset}"
 		ret=1
 	fi
 
@@ -426,24 +512,46 @@ camera_is_plugged() {
 get_camera_name() {
 	local camera
 	if camera_is_plugged; then
-		camera=$(gphoto2 -a | head -n 1 | sed -r s'/^[^:]+: //')
+		camera=$(gphoto2 -a | head -n 1 | $sed 's/^[^:]+: //')
 		echo $camera
 	fi
 }
 
 get_camera_raw_setting() {
-	local raw_setting
-	raw_setting=$(gphoto2 --get-config /main/imgsettings/imageformat | awk '
+	local key raw_setting
+
+	# Try know configuration keys one after another, because cameras
+	# don't support the same keys.
+
+	# This one seems supported by most cameras.
+	key="/main/imgsettings/imageformat"
+	raw_setting=$(gphoto2 --get-config "$key" | awk "
 /^Choice: [0-9]+ RAW$/ {
-	id = $0;
-	sub(/^Choice: /, "", id);
-	sub(/ RAW$/, "", id);
-	print id;
+	id = \$0;
+	sub(/^Choice: /, \"\", id);
+	sub(/ RAW$/, \"\", id);
+	print \"$key=\" id;
 	exit;
 }
-')
+")
+	if [ "$raw_setting" ]; then
+		echo "$raw_setting"
+	fi
 
-	echo $raw_setting
+	# This one is used by Nikon cameras (at least, some).
+	key="/main/capturesettings/imagequality"
+	raw_setting=$(gphoto2 --get-config "$key" | awk "
+/^Choice: [0-9]+ NEF \(Raw\)$/ {
+	id = \$0;
+	sub(/^Choice: /, \"\", id);
+	sub(/ NEF \(Raw\)$/, \"\", id);
+	print \"$key=\" id;
+	exit;
+}
+")
+	if [ "$raw_setting" ]; then
+		echo "$raw_setting"
+	fi
 }
 
 get_camera_iso_settings() {
@@ -492,7 +600,7 @@ auto_capture_images() {
 	if [ "$do_profiling_shots" = "0" ]; then
 		cat <<EOF
 
-The script will use existing input images for the profiling. No more
+The script will use existing input RAW images for the profiling. No more
 shot will be taken.
 EOF
 		return 0
@@ -535,15 +643,19 @@ EOF
 	fi
 	while ! camera_is_plugged; do
 		cat <<EOF
-ERROR: No camera found by gphoto2(1)!
+${color_error}ERROR: No camera found by gphoto2(1)!
 
-Retry or check gphoto2 documentation.
+Retry or check gphoto2 documentation.${color_reset}
 EOF
 		read answer
 	done
 
 	# If we reach this part, a camera is plugged in and the user
 	# wants us to take the pictures for him.
+
+	if [ -z "$raw_config" ]; then
+		raw_config=$(get_camera_raw_setting)
+	fi
 
 	# If he didn't specify any ISO settings, query the camera.
 	if [ -z "$iso_settings" ]; then
@@ -561,10 +673,7 @@ EOF
 	# instance, and the benchmark script will choose the best
 	# preset.
 	shots_per_iso=1
-	case $(uname -s) in
-	Linux) shots_seq=$(seq $shots_per_iso) ;;
-	*BSD)  shots_seq=$(jot $shots_per_iso) ;;
-	esac
+	shots_seq="$shots_per_iso"
 
 	# gphoto2(1) writes images to the current directory, so cd to
 	# the profiling directory.
@@ -594,12 +703,10 @@ EOF
 			cat <<EOF
 
 $profiling_note
+
+Press Enter when ready.
 EOF
 			read answer
-		fi
-
-		if [ -z "$raw_id" ]; then
-			raw_id=$(get_camera_raw_setting)
 		fi
 
 		# This script will do $shots_seq shots for each ISO setting.
@@ -611,7 +718,7 @@ EOF
 			not_first_round=1
 
 			gphoto2						\
-			 --set-config /main/imgsettings/imageformat=$raw_id\
+			 --set-config "$raw_config"			\
 			 --set-config /main/imgsettings/iso=$iso	\
 			 --filename="$iso-$i.%C"			\
 			 --capture-image-and-download
@@ -630,68 +737,4 @@ EOF
 	cd -
 }
 
-# --------------------------------------------------------------------
-# Database handling.
-# --------------------------------------------------------------------
-
-add_profile() {
-	local database label_prefix label iso a0 a1 a2 b0 b1 b2 	\
-	 bin1 bina0 bina1 bina2 binb0 binb1 binb2 floatdump
-
-	database=$1; shift
-	label_prefix=$1; shift
-	iso=$1; shift
-	a0=$1; shift
-	a1=$1; shift
-	a2=$1; shift
-	b0=$1; shift
-	b1=$1; shift
-	b2=$1; shift
-	label="$@"
-
-	tool_installed sqlite3
-
-	floatdump="$scriptdir/floatdump"
-
-	bin1=$(echo 1.0f | $floatdump)
-	bina0=$(echo $a0 | $floatdump)
-	bina1=$(echo $a1 | $floatdump)
-	bina2=$(echo $a2 | $floatdump)
-	binb0=$(echo $b0 | $floatdump)
-	binb1=$(echo $b1 | $floatdump)
-	binb2=$(echo $b2 | $floatdump)
-
-	echo "--> Adding \"$label\" to database"
-
-	echo "insert into presets ("					\
-	 "name,"							\
-	 "description,"							\
-	 "operation,"							\
-	 "op_version,"							\
-	 "op_params,"							\
-	 "enabled,"							\
-	 "blendop_params,"						\
-	 "model,"							\
-	 "maker,"							\
-	 "lens,"							\
-	 "iso_min,"							\
-	 "iso_max,"							\
-	 "exposure_min,"						\
-	 "exposure_max,"						\
-	 "aperture_min,"						\
-	 "aperture_max,"						\
-	 "focal_length_min,"						\
-	 "focal_length_max,"						\
-	 "writeprotect,"						\
-	 "autoapply,"							\
-	 "filter,"							\
-	 "def,"								\
-	 "isldr,"							\
-	 "blendop_version"						\
-	 ") "								\
-	 "values ("							\
-	 "'$label', '', 'denoiseprofile', 1, "				\
-	 "X'${bin1}${bin1}${bina0}${bina1}${bina2}${binb0}${binb1}${binb2}', "\
-	 "1, X'00', '', '', '', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4);" | \
-	sqlite3 $database
-}
+set_sed_cmd

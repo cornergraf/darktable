@@ -3,17 +3,17 @@
 #
 #  LIBSOUP2_FOUND                True if libsoup2 got found
 #  LIBSOUP2_INCLUDE_DIRS         Location of libsoup2 headers 
-#  LIBSOUP2_LIBRARIES            List of libaries to use libsoup2
+#  LIBSOUP2_LIBRARIES            List of libraries to use libsoup2
 #  LIBSOUP2_LIBRARY_DIRS         Location of libsoup2 library
 #
 #  LIBSOUP22_FOUND               True if libsoup2.2 got found
 #  LIBSOUP22_INCLUDE_DIRS        Location of libsoup2.2 headers 
-#  LIBSOUP22_LIBRARIES           List of libaries to use libsoup2.2
+#  LIBSOUP22_LIBRARIES           List of libraries to use libsoup2.2
 #  LIBSOUP22_LIBRARY_DIRS        Location of libsoup2.2 library
 #
 #  LIBSOUP24_FOUND               True if libsoup2.4 got found
 #  LIBSOUP24_INCLUDE_DIRS        Location of libsoup2.4 headers 
-#  LIBSOUP24_LIBRARIES           List of libaries to use libsoup2.4
+#  LIBSOUP24_LIBRARIES           List of libraries to use libsoup2.4
 #  LIBSOUP24_LIBRARY_DIRS        Location of libsoup2.4 library
 #
 #  Set LIBSOUP2_MIN_VERSION to find libsoup2.2 or libsoup2.4 if only 
@@ -85,7 +85,7 @@ IF ( LIBSOUP24_FOUND )
 	SET( LIBSOUP2_FOUND ${LIBSOUP24_FOUND} CACHE INTERNAL "" )
 	SET( LIBSOUP2_INCLUDE_DIRS ${LIBSOUP24_INCLUDE_DIRS} CACHE INTERNAL "" )
 	foreach(i ${LIBSOUP24_LIBRARIES})
-		find_library(_libsoup2_LIBRARY NAMES ${i} PATHS ${LIBSOUP24_LIBRARY_DIRS})
+		find_library(_libsoup2_LIBRARY NAMES ${i} HINTS ${LIBSOUP24_LIBRARY_DIRS})
 		LIST(APPEND LIBSOUP2_LIBRARIES ${_libsoup2_LIBRARY})
 		unset(_libsoup2_LIBRARY CACHE)
 	endforeach(i)
@@ -94,7 +94,7 @@ ELSEIF ( LIBSOUP22_FOUND )
 	SET( LIBSOUP2_FOUND ${LIBSOUP22_FOUND} CACHE INTERNAL "" )
 	SET( LIBSOUP2_INCLUDE_DIRS ${LIBSOUP22_INCLUDE_DIRS} CACHE INTERNAL "" )
 	foreach(i ${LIBSOUP22_LIBRARIES})
-		find_library(_libsoup2_LIBRARY NAMES ${i} PATHS ${LIBSOUP22_LIBRARY_DIRS})
+		find_library(_libsoup2_LIBRARY NAMES ${i} HINTS ${LIBSOUP22_LIBRARY_DIRS})
 		LIST(APPEND LIBSOUP2_LIBRARIES ${_libsoup2_LIBRARY})
 		unset(_libsoup2_LIBRARY CACHE)
 	endforeach(i)

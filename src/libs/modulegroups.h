@@ -16,6 +16,8 @@
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#pragma once
+
 /* the defined modules groups, the specific order here sets the order
    of buttons in modulegroup buttonrow
 */
@@ -30,12 +32,13 @@ typedef enum dt_lib_modulegroup_t
   DT_MODULEGROUP_CORRECT,
   DT_MODULEGROUP_EFFECT,
 
-  /* dont touch the following */
+  /* don't touch the following */
   DT_MODULEGROUP_SIZE,
 
   DT_MODULEGROUP_NONE
 
 } dt_lib_modulegroup_t;
+
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
-// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

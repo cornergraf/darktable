@@ -19,177 +19,227 @@
 #include "common/darktable.h"
 #include "common/image.h"
 #include "common/image_cache.h"
-#include "common/imageio_module.h"
 #include "common/imageio.h"
-#include "control/control.h"
+#include "common/imageio_module.h"
 #include "control/conf.h"
-#include "gui/gtk.h"
+#include "control/control.h"
 #include "dtgtk/button.h"
 #include "dtgtk/paint.h"
+#include "gui/gtk.h"
+#include "imageio/storage/imageio_storage_api.h"
 #include <stdio.h>
 #include <stdlib.h>
 
-DT_MODULE(1)
+DT_MODULE(2)
 
 typedef struct _email_attachment_t
 {
-  uint32_t imgid;     // The image id of exported image
-  gchar *file;            // Full filename of exported image
-}
-_email_attachment_t;
+  uint32_t imgid; // The image id of exported image
+  gchar *file;    // Full filename of exported image
+} _email_attachment_t;
 
 // saved params
 typedef struct dt_imageio_email_t
 {
-  char filename[DT_MAX_PATH_LEN];
+  char filename[DT_MAX_PATH_FOR_PARAMS];
   GList *images;
-}
-dt_imageio_email_t;
+} dt_imageio_email_t;
 
 
-const char*
-name ()
+const char *name(const struct dt_imageio_module_storage_t *self)
 {
   return _("send as email");
 }
 
-int recommended_dimension(struct dt_imageio_module_storage_t *self, uint32_t *width, uint32_t *height)
+void *legacy_params(dt_imageio_module_storage_t *self, const void *const old_params,
+                    const size_t old_params_size, const int old_version, const int new_version,
+                    size_t *new_size)
 {
-  *width=1280;
-  *height=1280;
+  if(old_version == 1 && new_version == 2)
+  {
+    typedef struct dt_imageio_email_v1_t
+    {
+      char filename[1024];
+      GList *images;
+    } dt_imageio_email_v1_t;
+
+    dt_imageio_email_t *n = (dt_imageio_email_t *)malloc(sizeof(dt_imageio_email_t));
+    dt_imageio_email_v1_t *o = (dt_imageio_email_v1_t *)old_params;
+
+    g_strlcpy(n->filename, o->filename, sizeof(n->filename));
+
+    *new_size = self->params_size(self);
+    return n;
+  }
+  return NULL;
+}
+
+int recommended_dimension(struct dt_imageio_module_storage_t *self, dt_imageio_module_data_t *data, uint32_t *width, uint32_t *height)
+{
+  *width = 1536;
+  *height = 1536;
   return 1;
 }
 
 
-void
-gui_init (dt_imageio_module_storage_t *self)
+void gui_init(dt_imageio_module_storage_t *self)
 {
-
 }
 
-void
-gui_cleanup (dt_imageio_module_storage_t *self)
+void gui_cleanup(dt_imageio_module_storage_t *self)
 {
   free(self->gui_data);
 }
 
-void
-gui_reset (dt_imageio_module_storage_t *self)
+void gui_reset(dt_imageio_module_storage_t *self)
 {
-
 }
 
-int
-store (dt_imageio_module_data_t *sdata, const int imgid, dt_imageio_module_format_t *format, dt_imageio_module_data_t *fdata,
-       const int num, const int total, const gboolean high_quality)
+int store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *sdata, const int imgid,
+          dt_imageio_module_format_t *format, dt_imageio_module_data_t *fdata, const int num, const int total,
+          const gboolean high_quality, const gboolean upscale, dt_colorspaces_color_profile_type_t icc_type,
+          const gchar *icc_filename, dt_iop_color_intent_t icc_intent)
 {
   dt_imageio_email_t *d = (dt_imageio_email_t *)sdata;
 
-  _email_attachment_t *attachment = ( _email_attachment_t *)g_malloc(sizeof(_email_attachment_t));
+  _email_attachment_t *attachment = (_email_attachment_t *)g_malloc(sizeof(_email_attachment_t));
   attachment->imgid = imgid;
 
   /* construct a temporary file name */
-  char tmpdir[4096]= {0};
-  dt_loc_get_tmp_dir (tmpdir,4096);
+  char tmpdir[PATH_MAX] = { 0 };
+  dt_loc_get_tmp_dir(tmpdir, sizeof(tmpdir));
 
-  char dirname[4096];
-  dt_image_full_path(imgid, dirname, 1024);
-  const gchar * filename = g_path_get_basename( dirname );
-  gchar * end = g_strrstr( filename,".")+1;
-  g_strlcpy( end, format->extension(fdata), sizeof(dirname)-(end-dirname));
+  char dirname[PATH_MAX] = { 0 };
+  gboolean from_cache = FALSE;
+  dt_image_full_path(imgid, dirname, sizeof(dirname), &from_cache);
+  gchar *filename = g_path_get_basename(dirname);
 
-  attachment->file = g_build_filename( tmpdir, filename, (char *)NULL );
+  g_strlcpy(dirname, filename, sizeof(dirname));
 
-  if(dt_imageio_export(imgid, attachment->file, format, fdata, high_quality) != 0)
+  dt_image_path_append_version(imgid, dirname, sizeof(dirname));
+
+  gchar *end = g_strrstr(dirname, ".") + 1;
+
+  if(end) *end = '\0';
+
+  g_strlcat(dirname, format->extension(fdata), sizeof(dirname));
+
+  // set exported filename
+
+  attachment->file = g_build_filename(tmpdir, dirname, (char *)NULL);
+
+  if(dt_imageio_export(imgid, attachment->file, format, fdata, high_quality, upscale, FALSE, icc_type, icc_filename,
+                       icc_intent, self, sdata, num, total) != 0)
   {
     fprintf(stderr, "[imageio_storage_email] could not export to file: `%s'!\n", attachment->file);
     dt_control_log(_("could not export to file `%s'!"), attachment->file);
+    g_free(attachment->file);
     g_free(attachment);
+    g_free(filename);
     return 1;
   }
 
-
-  char *trunc = attachment->file + strlen(attachment->file) - 32;
-  if(trunc < attachment->file) trunc = attachment->file;
-  dt_control_log(_("%d/%d exported to `%s%s'"), num, total, trunc != filename ? ".." : "", trunc);
+  dt_control_log(ngettext("%d/%d exported to `%s'", "%d/%d exported to `%s'", num),
+                 num, total, attachment->file);
 
 #ifdef _OPENMP // store can be called in parallel, so synch access to shared memory
-  #pragma omp critical
+#pragma omp critical
 #endif
-  d->images = g_list_append( d->images, attachment );
+  d->images = g_list_append(d->images, attachment);
+
+  g_free(filename);
 
   return 0;
 }
 
-void*
-get_params(dt_imageio_module_storage_t *self, int *size)
+size_t params_size(dt_imageio_module_storage_t *self)
 {
-  *size = sizeof(dt_imageio_email_t) - sizeof(GList *);
-  dt_imageio_email_t *d = (dt_imageio_email_t *)g_malloc(sizeof(dt_imageio_email_t));
-  memset( d,0,sizeof( dt_imageio_email_t));
+  return sizeof(dt_imageio_email_t) - sizeof(GList *);
+}
+
+void init(dt_imageio_module_storage_t *self)
+{
+}
+
+void *get_params(dt_imageio_module_storage_t *self)
+{
+  dt_imageio_email_t *d = (dt_imageio_email_t *)g_malloc0(sizeof(dt_imageio_email_t));
   return d;
 }
 
-int
-set_params(dt_imageio_module_format_t *self, void *params, int size)
+int set_params(dt_imageio_module_storage_t *self, const void *params, const int size)
 {
-  if(size != sizeof(dt_imageio_email_t) - sizeof(GList *)) return 1;
+  if(size != self->params_size(self)) return 1;
   return 0;
 }
 
-void
-free_params(dt_imageio_module_storage_t *self, void *params)
+void free_params(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *params)
 {
+  if(!params) return;
   free(params);
 }
 
-void
-finalize_store(dt_imageio_module_storage_t *self, void *params)
+void finalize_store(dt_imageio_module_storage_t *self, dt_imageio_module_data_t *params)
 {
   dt_imageio_email_t *d = (dt_imageio_email_t *)params;
 
-  // All images are exported, generate a mailto uri and startup default mail client
-  gchar uri[4096]= {0};
-  gchar body[4096]= {0};
-  gchar attachments[4096]= {0};
-  gchar *uriFormat=NULL;
-  gchar *subject=_("images exported from darktable");
-  gchar *imageBodyFormat="%s %s"; // filename, exif oneliner
-  gchar *attachmentFormat=NULL;
-  gchar *attachmentSeparator="";
+  const gchar *imageBodyFormat = " - %s (%s)\\n";      // filename, exif oneliner
+  const gint nb_images = g_list_length(d->images);
+  const gint argc = 5 + (2 * nb_images);
 
-  // If no default handler detected above, we use gtk_show_uri with mailto:// and hopes things goes right..
-  uriFormat="xdg-email --subject \"%s\" --body \"%s\" %s &";   // subject, body, and list of attachments with format:
-  attachmentFormat=" --attach \"%s\"";
+  char **argv = g_malloc0(sizeof(char *) * (argc + 1));
 
-  while( d->images )
+  gchar *body = "";
+
+  argv[0] = "xdg-email";
+  argv[1] = "--subject";
+  argv[2] = _("images exported from darktable");
+  argv[3] = "--body";
+  int n = 5;
+
+  for(GList *iter = d->images; iter; iter = g_list_next(iter))
   {
-    gchar exif[256]= {0};
-    _email_attachment_t *attachment=( _email_attachment_t *)d->images->data;
-    const gchar *filename = g_path_get_basename( attachment->file );
-    const dt_image_t *img = dt_image_cache_read_get(darktable.image_cache, attachment->imgid);
-    dt_image_print_exif( img, exif, 256 );
-    g_snprintf(body+strlen(body),4096-strlen(body), imageBodyFormat, filename, exif );
-
-    if( strlen( attachments ) )
-      g_snprintf(attachments+strlen(attachments),4096-strlen(attachments), "%s", attachmentSeparator );
-
-    g_snprintf(attachments+strlen(attachments),4096-strlen(attachments), attachmentFormat, attachment->file );
-    // Free attachment item and remove
+    gchar exif[256] = { 0 };
+    _email_attachment_t *attachment = (_email_attachment_t *)iter->data;
+    gchar *filename = g_path_get_basename(attachment->file);
+    const dt_image_t *img = dt_image_cache_get(darktable.image_cache, attachment->imgid, 'r');
+    dt_image_print_exif(img, exif, sizeof(exif));
     dt_image_cache_read_release(darktable.image_cache, img);
-    g_free( d->images->data );
-    d->images = g_list_remove( d->images, d->images->data );
+
+    gchar *imgbody = g_strdup_printf(imageBodyFormat, filename, exif);
+    body = g_strconcat(body, imgbody, NULL);
+
+    g_free(imgbody);
+    g_free(filename);
+
+    argv[n]   = g_strdup("--attach");
+    // use attachment->file directly as we need to freed it, and this way it will be
+    // freed as part of the argument release after the spawn below.
+    argv[n+1] = attachment->file;
+    n += 2;
   }
+  g_list_free_full(d->images, g_free);
+  d->images = NULL;
 
-  // build uri and launch before we quit...
-  g_snprintf( uri, 4096,  uriFormat, subject, body, attachments );
+  argv[4] = body;
 
-  fprintf(stderr, "[email] launching `%s'\n", uri);
-  if(system( uri ) < 0)
+  argv[argc] = NULL;
+
+  fprintf(stderr, "[email] launching '");
+  for (int k=0; k<argc; k++) fprintf(stderr, " %s", argv[k]);
+  fprintf(stderr, "'\n");
+
+  gint exit_status = 0;
+
+  g_spawn_sync (NULL, argv, NULL, G_SPAWN_SEARCH_PATH | G_SPAWN_STDOUT_TO_DEV_NULL | G_SPAWN_STDERR_TO_DEV_NULL,
+                NULL, NULL, NULL, NULL, &exit_status, NULL);
+
+  for (int k=4; k<argc; k++) g_free(argv[k]);
+  g_free(argv);
+
+  if(exit_status)
   {
-    // TODO: after string freeze is broken again, report to ui:
-    // dt_control_log(_("could not launch email client!"));
-    fprintf(stderr, "[email] could not launch subprocess!\n");
+    dt_control_log(_("could not launch email client!"));
   }
 }
 
@@ -204,4 +254,4 @@ int supported(struct dt_imageio_module_storage_t *storage, struct dt_imageio_mod
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
-// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

@@ -1,38 +1,78 @@
 #!/bin/sh
 
-git log ^release-1.0.5 HEAD| grep ^Author: | sed 's/ <.*//; s/^Author: //' | sort | uniq -c | sort -nr
+DT_SRC_DIR=$(dirname "$0")
+DT_SRC_DIR=$(cd "$DT_SRC_DIR/../" && pwd -P)
+
+cd "$DT_SRC_DIR" || exit
+
+git shortlog -sne release-2.5.0..HEAD
 
 echo "are you sure these guys received proper credit in the about dialog?"
-read answer
+echo "HINT: $ tools/generate_authors.rb release-2.2.0..HEAD > AUTHORS"
+read -r answer
 
 # prefix rc with ~, so debian thinks its less than
-dt_decoration=$(git describe --tags $branch | sed 's,^release-,,;s,-,+,;s,-,~,;' | sed 's/rc/~rc/')
-git archive HEAD --prefix=darktable-$dt_decoration/ -o darktable-$dt_decoration.tar
+echo "* archiving git tree"
 
-mkdir -p tmp
-cd tmp
-tar xvf ../darktable-$dt_decoration.tar
+dt_decoration=$(git describe --tags | sed -e 's,^release-,,;s,-,+,;s,-,~,;' -e 's/rc/~rc/')
+
+echo "* * creating root archive"
+git archive --format tar HEAD --prefix=darktable-"$dt_decoration"/ -o darktable-"$dt_decoration".tar
+
+echo "* * creating submodule archives"
+# for each of git submodules append to the root archive
+git submodule foreach --recursive 'git archive --format tar --verbose --prefix="darktable-'"$dt_decoration"'/$path/" HEAD --output "'"$DT_SRC_DIR"'/darktable-sub-$sha1.tar"'
+
+if [ $(ls "$DT_SRC_DIR/darktable-sub-"*.tar | wc -l) != 0  ]; then
+  echo "* * appending submodule archives, combining all tars"
+  tar --concatenate --file "$DT_SRC_DIR/darktable-$dt_decoration.tar" "$DT_SRC_DIR/darktable-sub-"*.tar
+  # remove sub tars
+  echo "* * removing all sub tars"
+  rm -rf "$DT_SRC_DIR/darktable-sub-"*.tar
+fi
+
+echo "* * done creating archive"
+
+TMPDIR=$(mktemp -d -t darktable-XXXXXX)
+cd "$TMPDIR" || exit
+
+tar xf "$DT_SRC_DIR/darktable-$dt_decoration.tar"
 
 # create version header for non-git tarball:
-echo "set(PROJECT_VERSION \"$dt_decoration\")" >> darktable-$dt_decoration/cmake/version.cmake
+echo "* creating version header"
+"$DT_SRC_DIR/tools/create_version_c.sh" "darktable-$dt_decoration/src/version_gen.c" "$dt_decoration"
 
-# remove docs, that's > 45 MB
-rm -rf darktable-$dt_decoration/doc/htdocs
-cp darktable-$dt_decoration/doc/usermanual/CMakeLists.txt dreggn.txt
-rm -rf darktable-$dt_decoration/doc/usermanual/*
-mv dreggn.txt darktable-$dt_decoration/doc/usermanual/CMakeLists.tx
-tar cvzf darktable-$dt_decoration.tar.gz darktable-$dt_decoration/
-rm ../darktable-$dt_decoration.tar
-mv darktable-$dt_decoration.tar.gz ..
+# remove usermanual, that's > 80 MB and released separately
+echo "* removing usermanual"
+rm -rf darktable-"$dt_decoration"/doc/usermanual
+
+# drop regression_tests. for internal use, and need git anyway
+echo "* removing tools/regression_tests"
+rm -rf darktable-"$dt_decoration"/tools/regression_tests
+
+# drop all git-related stuff
+find darktable-"$dt_decoration"/ -iname '.git*' -delete
+
+# ... and also remove RELEASE_NOTES. that file is just for internal use
+#echo "* removing RELEASE_NOTES"
+#rm -rf darktable-$dt_decoration/RELEASE_NOTES
+
+# wrap it up again
+echo "* creating final tarball"
+tar cf darktable-$dt_decoration.tar darktable-$dt_decoration/ || exit
+rm "$DT_SRC_DIR/darktable-$dt_decoration.tar"
+xz -z -v -9 -e "darktable-$dt_decoration.tar"
+cp "darktable-$dt_decoration.tar.xz" "$DT_SRC_DIR"
 
 # now test the build:
-rm -rf darktable-*
-tar xvzf ../darktable-$dt_decoration.tar.gz
-cd darktable-*
-./build.sh
+echo "* test compiling"
+rm -rf "darktable-$dt_decoration/"
+tar xf "darktable-$dt_decoration.tar.xz"
+cd "darktable-$dt_decoration/" || exit
+./build.sh --prefix "$TMPDIR/darktable/"
 
-echo "actually to test this build you should do:"
-echo "cd tmp/darktable-$dt_decoration/build && sudo make install"
-
-
-
+echo
+echo "to actually test this build you should do:"
+echo "cd $TMPDIR/darktable-$dt_decoration/build && make install"
+echo "then run darktable from:"
+echo "$TMPDIR/darktable/bin/darktable"

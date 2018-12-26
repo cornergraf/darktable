@@ -18,32 +18,41 @@
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <xmmintrin.h>
-#include <stdlib.h>
-#include <math.h>
-#include <assert.h>
-#include <string.h>
+#include "bauhaus/bauhaus.h"
+#include "common/imageio.h"
+#include "common/opencl.h"
+#include "control/control.h"
 #include "develop/develop.h"
 #include "develop/imageop.h"
+#include "develop/imageop_math.h"
 #include "develop/tiling.h"
-#include "control/control.h"
-#include "common/opencl.h"
-#include "common/imageio.h"
-#include "bauhaus/bauhaus.h"
+#include "dtgtk/gradientslider.h"
 #include "gui/accelerators.h"
 #include "gui/gtk.h"
 #include "gui/presets.h"
-#include "dtgtk/gradientslider.h"
+#include "iop/iop_api.h"
+#include "common/iop_group.h"
+#include <assert.h>
+#include <math.h>
+#include <stdlib.h>
+#include <string.h>
+
 #include <gtk/gtk.h>
 #include <inttypes.h>
+#if defined(__SSE__)
 #include <xmmintrin.h>
+#endif
 
-#define CLIP(x) ((x<0)?0.0:(x>1.0)?1.0:x)
+#define CLIP(x) ((x < 0) ? 0.0 : (x > 1.0) ? 1.0 : x)
 #define TEA_ROUNDS 8
 
-DT_MODULE(1)
+DT_MODULE_INTROSPECTION(1, dt_iop_dither_params_t)
 
-typedef __m128 (_find_nearest_color)(float *val, const float f, const float rf);
+typedef void(_find_nearest_color)(float *val, float *err, const float f, const float rf);
+
+#if defined(__SSE__)
+typedef __m128(_find_nearest_color_sse)(float *val, const float f, const float rf);
+#endif
 
 typedef enum dt_iop_dither_type_t
 {
@@ -58,16 +67,15 @@ typedef enum dt_iop_dither_type_t
 
 typedef struct dt_iop_dither_params_t
 {
-  int dither_type;
-  int palette;        // reserved for future extensions
+  dt_iop_dither_type_t dither_type;
+  int palette; // reserved for future extensions
   struct
   {
-    float radius;     // reserved for future extensions
-    float range[4];   // reserved for future extensions
+    float radius;   // reserved for future extensions
+    float range[4]; // reserved for future extensions
     float damping;
   } random;
-}
-dt_iop_dither_params_t;
+} dt_iop_dither_params_t;
 
 typedef struct dt_iop_dither_gui_data_t
 {
@@ -77,21 +85,19 @@ typedef struct dt_iop_dither_gui_data_t
   GtkWidget *range;
   GtkWidget *range_label;
   GtkWidget *damping;
-}
-dt_iop_dither_gui_data_t;
+} dt_iop_dither_gui_data_t;
 
 typedef struct dt_iop_dither_data_t
 {
-  int dither_type;
-  int dither_center_view;
+  dt_iop_dither_type_t dither_type;
   struct
   {
     float radius;
     float range[4];
     float damping;
   } random;
-}
-dt_iop_dither_data_t;
+} dt_iop_dither_data_t;
+
 
 const char *name()
 {
@@ -99,40 +105,60 @@ const char *name()
 }
 
 
-int
-groups ()
+int groups()
 {
-  return IOP_GROUP_CORRECT;
+  return dt_iop_get_group("dithering", IOP_GROUP_CORRECT);
 }
 
-int
-flags ()
+int flags()
 {
   return IOP_FLAGS_ONE_INSTANCE;
 }
 
 
-void init_presets (dt_iop_module_so_t *self)
+void init_presets(dt_iop_module_so_t *self)
 {
-  dt_iop_dither_params_t tmp = (dt_iop_dither_params_t)
-    { DITHER_FSAUTO, 0, { 0.0f, { 0.0f, 0.0f, 1.0f, 1.0f }, -200.0f } };
+  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), "BEGIN", NULL, NULL, NULL);
+
+  dt_iop_dither_params_t tmp
+      = (dt_iop_dither_params_t){ DITHER_FSAUTO, 0, { 0.0f, { 0.0f, 0.0f, 1.0f, 1.0f }, -200.0f } };
   // add the preset.
-  dt_gui_presets_add_generic(_("dithering"), self->op, self->version(), &tmp, sizeof(dt_iop_dither_params_t), 1);
+  dt_gui_presets_add_generic(_("dither"), self->op, self->version(), &tmp, sizeof(dt_iop_dither_params_t), 1);
   // make it auto-apply for all images:
-  dt_gui_presets_update_autoapply(_("dithering"), self->op, self->version(), 1);
+  // dt_gui_presets_update_autoapply(_("dither"), self->op, self->version(), 1);
+
+  DT_DEBUG_SQLITE3_EXEC(dt_database_get(darktable.db), "COMMIT", NULL, NULL, NULL);
 }
 
+
 // dither pixel into gray, with f=levels-1 and rf=1/f, return err=old-new
-static __m128
-_find_nearest_color_n_levels_gray(float *val, const float f, const float rf)
+static void _find_nearest_color_n_levels_gray(float *val, float *err, const float f, const float rf)
+{
+  const float in = 0.30f * val[0] + 0.59f * val[1] + 0.11f * val[2]; // RGB -> GRAY
+
+  float tmp = in * f;
+  int itmp = floorf(tmp);
+
+  float new = (tmp - itmp > 0.5f ? (float)(itmp + 1) : (float)itmp) * rf;
+
+  for(int c = 0; c < 4; c++)
+  {
+    err[c] = val[c] - new;
+    val[c] = new;
+  }
+}
+
+#if defined(__SSE2__)
+// dither pixel into gray, with f=levels-1 and rf=1/f, return err=old-new
+static __m128 _find_nearest_color_n_levels_gray_sse(float *val, const float f, const float rf)
 {
   __m128 err;
   __m128 new;
 
-  const float in = 0.30f*val[0] + 0.59f*val[1] + 0.11f*val[2];                                // RGB -> GRAY
+  const float in = 0.30f * val[0] + 0.59f * val[1] + 0.11f * val[2]; // RGB -> GRAY
 
   float tmp = in * f;
-  int itmp  = floorf(tmp);
+  int itmp = floorf(tmp);
 
   new = _mm_set1_ps(tmp - itmp > 0.5f ? (float)(itmp + 1) * rf : (float)itmp * rf);
   err = _mm_sub_ps(_mm_load_ps(val), new);
@@ -140,31 +166,60 @@ _find_nearest_color_n_levels_gray(float *val, const float f, const float rf)
 
   return err;
 }
+#endif
 
 // dither pixel into RGB, with f=levels-1 and rf=1/f, return err=old-new
-static __m128
-_find_nearest_color_n_levels_rgb(float *val, const float f, const float rf)
+static void _find_nearest_color_n_levels_rgb(float *val, float *err, const float f, const float rf)
 {
-  __m128 old  = _mm_load_ps(val);
-  __m128 tmp  = _mm_mul_ps(old, _mm_set1_ps(f));                                               // old * f
-  __m128 itmp = _mm_cvtepi32_ps(_mm_cvtps_epi32(tmp));                                         // floor(tmp)
-  __m128 new  = _mm_mul_ps(_mm_add_ps(itmp, _mm_and_ps(_mm_cmpgt_ps(_mm_sub_ps(tmp, itmp),     // (tmp - itmp > 0.5f ? itmp + 1 : itmp) * rf
-                                   _mm_set1_ps(0.5f)), _mm_set1_ps(1.0f))), _mm_set1_ps(rf));
-                                      
+  for(int c = 0; c < 4; c++)
+  {
+    float old = val[c];
+    float tmp = old * f;
+    float itmp = floorf(tmp);
+    float new = (tmp - itmp > 0.5f ? itmp + 1 : itmp) * rf;
+
+    val[c] = new;
+    err[c] = old - new;
+  }
+}
+
+#if defined(__SSE2__)
+// dither pixel into RGB, with f=levels-1 and rf=1/f, return err=old-new
+static __m128 _find_nearest_color_n_levels_rgb_sse2(float *val, const float f, const float rf)
+{
+  __m128 old = _mm_load_ps(val);
+  __m128 tmp = _mm_mul_ps(old, _mm_set1_ps(f));        // old * f
+  __m128 itmp = _mm_cvtepi32_ps(_mm_cvtps_epi32(tmp)); // floor(tmp)
+  __m128 new = _mm_mul_ps(
+      _mm_add_ps(itmp,
+                 _mm_and_ps(_mm_cmpgt_ps(_mm_sub_ps(tmp, itmp), // (tmp - itmp > 0.5f ? itmp + 1 : itmp) * rf
+                                         _mm_set1_ps(0.5f)),
+                            _mm_set1_ps(1.0f))),
+      _mm_set1_ps(rf));
+
   _mm_store_ps(val, new);
 
   return _mm_sub_ps(old, new);
 }
+#endif
 
-
-static inline void
-_diffuse_error(float *val, const __m128 err, const float factor)
+static inline void _diffuse_error(float *val, const float *err, const float factor)
 {
-  _mm_store_ps(val, _mm_add_ps(_mm_load_ps(val), _mm_mul_ps(err, _mm_set1_ps(factor))));       // *val += err * factor
+  for(int c = 0; c < 4; c++)
+  {
+    val[c] += err[c] * factor;
+  }
 }
 
-static inline float
-clipnan(const float x)
+#if defined(__SSE__)
+static inline void _diffuse_error_sse(float *val, const __m128 err, const float factor)
+{
+  _mm_store_ps(val,
+               _mm_add_ps(_mm_load_ps(val), _mm_mul_ps(err, _mm_set1_ps(factor)))); // *val += err * factor
+}
+#endif
+
+static inline float clipnan(const float x)
 {
   float r;
 
@@ -176,29 +231,31 @@ clipnan(const float x)
   return r;
 }
 
-void process_floyd_steinberg (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, void *ivoid, void *ovoid, const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out)
+static void process_floyd_steinberg(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
+                                    const void *const ivoid, void *const ovoid,
+                                    const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
   dt_iop_dither_data_t *data = (dt_iop_dither_data_t *)piece->data;
 
   const int width = roi_in->width;
   const int height = roi_in->height;
   const int ch = piece->colors;
-  const float scale = roi_in->scale/piece->iscale;
-  const int l1 = floorf(1.0f + dt_log2f(1.0f/scale));
+  const float scale = roi_in->scale / piece->iscale;
+  const int l1 = floorf(1.0f + dt_log2f(1.0f / scale));
 
   _find_nearest_color *nearest_color = NULL;
   unsigned int levels = 1;
-  int bds = (piece->pipe->type != DT_DEV_PIXELPIPE_EXPORT) ? l1*l1 : 1;
+  int bds = (piece->pipe->type != DT_DEV_PIXELPIPE_EXPORT) ? l1 * l1 : 1;
 
   switch(data->dither_type)
   {
     case DITHER_FS1BIT:
       nearest_color = _find_nearest_color_n_levels_gray;
-      levels = MAX(2, MIN(bds+1, 256));
+      levels = MAX(2, MIN(bds + 1, 256));
       break;
     case DITHER_FS4BIT_GRAY:
       nearest_color = _find_nearest_color_n_levels_gray;
-      levels = MAX(16, MIN(15*bds+1, 256));
+      levels = MAX(16, MIN(15 * bds + 1, 256));
       break;
     case DITHER_FS8BIT:
       nearest_color = _find_nearest_color_n_levels_rgb;
@@ -239,22 +296,25 @@ void process_floyd_steinberg (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop
           nearest_color = NULL;
           break;
       }
-      // no automatic dithering for preview and thumbnail and also not for center view if according
-      // config variable is FALSE
-      if(piece->pipe->type == DT_DEV_PIXELPIPE_PREVIEW || piece->pipe->type == DT_DEV_PIXELPIPE_THUMBNAIL ||
-           (piece->pipe->type == DT_DEV_PIXELPIPE_FULL && !data->dither_center_view))
-         nearest_color = NULL;
+      // no automatic dithering for preview and thumbnail
+      if(piece->pipe->type == DT_DEV_PIXELPIPE_PREVIEW || piece->pipe->type == DT_DEV_PIXELPIPE_THUMBNAIL)
+        nearest_color = NULL;
+      break;
+    case DITHER_RANDOM:
+      // this function won't ever be called for that type
+      // instead, process_random() will be called
+      __builtin_unreachable();
       break;
   }
 
 #ifdef _OPENMP
-  #pragma omp parallel for default(none) shared(ivoid, ovoid) schedule(static)
+#pragma omp parallel for default(none) schedule(static)
 #endif
-  for(int j=0; j<height; j++)
+  for(int j = 0; j < height; j++)
   {
-    const float *in = (const float *)ivoid + ch*width*j;
-    float *out = (float *)ovoid + ch*width*j;
-    for(int i=0; i<width; i++, in+=ch, out+=ch)
+    const float *in = (const float *)ivoid + (size_t)ch * width * j;
+    float *out = (float *)ovoid + (size_t)ch * width * j;
+    for(int i = 0; i < width; i++, in += ch, out += ch)
     {
       out[0] = clipnan(in[0]);
       out[1] = clipnan(in[1]);
@@ -265,84 +325,248 @@ void process_floyd_steinberg (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop
   if(nearest_color == NULL) return;
 
   const float f = levels - 1;
-  const float rf = 1.0/f;
-  __m128 err;
+  const float rf = 1.0 / f;
+  float err[4];
 
   // dither without error diffusion on very tiny images
   if(width < 3 || height < 3)
   {
-    for(int j=0; j<height; j++)
+    for(int j = 0; j < height; j++)
     {
-      float *out = ((float *)ovoid) + ch*j*width;
-      for(int i=0; i<width; i++)
-        (void)nearest_color(out+ch*i, f, rf);
+      float *out = ((float *)ovoid) + (size_t)ch * j * width;
+      for(int i = 0; i < width; i++) nearest_color(out + ch * i, err, f, rf);
     }
 
-    if(piece->pipe->mask_display)
-      dt_iop_alpha_copy(ivoid, ovoid, roi_out->width, roi_out->height);
+    if(piece->pipe->mask_display & DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out->width, roi_out->height);
     return;
   }
 
   // floyd-steinberg dithering follows here
 
   // first height-1 rows
-  for(int j=0; j<height-1; j++)
+  for(int j = 0; j < height - 1; j++)
   {
-    float *out = ((float *)ovoid) + ch*j*width;
+    float *out = ((float *)ovoid) + (size_t)ch * j * width;
 
     // first column
-    err = nearest_color(out, f, rf);
-    _diffuse_error(out+ch, err, 7.0f/16.0f);
-    _diffuse_error(out+ch*width, err, 5.0f/16.0f);
-    _diffuse_error(out+ch*(width+1), err, 1.0f/16.0f);
-    
+    nearest_color(out, err, f, rf);
+    _diffuse_error(out + ch, err, 7.0f / 16.0f);
+    _diffuse_error(out + ch * width, err, 5.0f / 16.0f);
+    _diffuse_error(out + ch * (width + 1), err, 1.0f / 16.0f);
+
 
     // main part of image
-    for(int i=1; i<width-1; i++)
+    for(int i = 1; i < width - 1; i++)
     {
-      err = nearest_color(out+ch*i, f, rf);
-      _diffuse_error(out+ch*(i+1), err, 7.0f/16.0f);
-      _diffuse_error(out+ch*(i-1)+ch*width, err, 3.0f/16.0f);
-      _diffuse_error(out+ch*i+ch*width, err, 5.0f/16.0f);
-      _diffuse_error(out+ch*(i+1)+ch*width, err, 1.0f/16.0f);
+      nearest_color(out + ch * i, err, f, rf);
+      _diffuse_error(out + ch * (i + 1), err, 7.0f / 16.0f);
+      _diffuse_error(out + ch * (i - 1) + ch * width, err, 3.0f / 16.0f);
+      _diffuse_error(out + ch * i + ch * width, err, 5.0f / 16.0f);
+      _diffuse_error(out + ch * (i + 1) + ch * width, err, 1.0f / 16.0f);
     }
 
     // last column
-    err = nearest_color(out+ch*(width-1), f, rf);
-    _diffuse_error(out+ch*(width-2)+ch*width, err, 3.0f/16.0f);
-    _diffuse_error(out+ch*(width-1)+ch*width, err, 5.0f/16.0f);
+    nearest_color(out + ch * (width - 1), err, f, rf);
+    _diffuse_error(out + ch * (width - 2) + ch * width, err, 3.0f / 16.0f);
+    _diffuse_error(out + ch * (width - 1) + ch * width, err, 5.0f / 16.0f);
   }
 
   // last row
   do
   {
-    float *out = ((float *)ovoid) + ch*(height-1)*width;
+    float *out = ((float *)ovoid) + (size_t)ch * (height - 1) * width;
 
     // lower left pixel
-    err = nearest_color(out, f, rf);
-    _diffuse_error(out+ch, err, 7.0f/16.0f);
-    
+    nearest_color(out, err, f, rf);
+    _diffuse_error(out + ch, err, 7.0f / 16.0f);
+
     // main part of last row
-    for(int i=1; i<width-1; i++)
+    for(int i = 1; i < width - 1; i++)
     {
-      err = nearest_color(out+ch*i, f, rf);
-      _diffuse_error(out+ch*(i+1), err, 7.0f/16.0f);
+      nearest_color(out + ch * i, err, f, rf);
+      _diffuse_error(out + ch * (i + 1), err, 7.0f / 16.0f);
     }
 
     // lower right pixel
-    (void)nearest_color(out+ch*(width-1), f, rf);
+    nearest_color(out + ch * (width - 1), err, f, rf);
 
   } while(0);
 
   // copy alpha channel if needed
-  if(piece->pipe->mask_display)
-    dt_iop_alpha_copy(ivoid, ovoid, roi_out->width, roi_out->height);
+  if(piece->pipe->mask_display & DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out->width, roi_out->height);
 }
 
-
-void encrypt_tea(unsigned int *arg)
+#if defined(__SSE2__)
+static void process_floyd_steinberg_sse2(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
+                                         const void *const ivoid, void *const ovoid,
+                                         const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
-  const unsigned int key[] = {0xa341316c, 0xc8013ea4, 0xad90777d, 0x7e95761e};
+  dt_iop_dither_data_t *data = (dt_iop_dither_data_t *)piece->data;
+
+  const int width = roi_in->width;
+  const int height = roi_in->height;
+  const int ch = piece->colors;
+  const float scale = roi_in->scale / piece->iscale;
+  const int l1 = floorf(1.0f + dt_log2f(1.0f / scale));
+
+  _find_nearest_color_sse *nearest_color = NULL;
+  unsigned int levels = 1;
+  int bds = (piece->pipe->type != DT_DEV_PIXELPIPE_EXPORT) ? l1 * l1 : 1;
+
+  switch(data->dither_type)
+  {
+    case DITHER_FS1BIT:
+      nearest_color = _find_nearest_color_n_levels_gray_sse;
+      levels = MAX(2, MIN(bds + 1, 256));
+      break;
+    case DITHER_FS4BIT_GRAY:
+      nearest_color = _find_nearest_color_n_levels_gray_sse;
+      levels = MAX(16, MIN(15 * bds + 1, 256));
+      break;
+    case DITHER_FS8BIT:
+      nearest_color = _find_nearest_color_n_levels_rgb_sse2;
+      levels = 256;
+      break;
+    case DITHER_FS16BIT:
+      nearest_color = _find_nearest_color_n_levels_rgb_sse2;
+      levels = 65536;
+      break;
+    case DITHER_FSAUTO:
+      switch(piece->pipe->levels & IMAGEIO_CHANNEL_MASK)
+      {
+        case IMAGEIO_RGB:
+          nearest_color = _find_nearest_color_n_levels_rgb_sse2;
+          break;
+        case IMAGEIO_GRAY:
+          nearest_color = _find_nearest_color_n_levels_gray_sse;
+          break;
+      }
+
+      switch(piece->pipe->levels & IMAGEIO_PREC_MASK)
+      {
+        case IMAGEIO_INT8:
+          levels = 256;
+          break;
+        case IMAGEIO_INT12:
+          levels = 4096;
+          break;
+        case IMAGEIO_INT16:
+          levels = 65536;
+          break;
+        case IMAGEIO_BW:
+          levels = 2;
+          break;
+        case IMAGEIO_INT32:
+        case IMAGEIO_FLOAT:
+        default:
+          nearest_color = NULL;
+          break;
+      }
+      // no automatic dithering for preview and thumbnail
+      if(piece->pipe->type == DT_DEV_PIXELPIPE_PREVIEW || piece->pipe->type == DT_DEV_PIXELPIPE_THUMBNAIL)
+        nearest_color = NULL;
+      break;
+    case DITHER_RANDOM:
+      // this function won't ever be called for that type
+      // instead, process_random() will be called
+      __builtin_unreachable();
+      break;
+  }
+
+#ifdef _OPENMP
+#pragma omp parallel for default(none) schedule(static)
+#endif
+  for(int j = 0; j < height; j++)
+  {
+    const float *in = (const float *)ivoid + (size_t)ch * width * j;
+    float *out = (float *)ovoid + (size_t)ch * width * j;
+    for(int i = 0; i < width; i++, in += ch, out += ch)
+    {
+      out[0] = clipnan(in[0]);
+      out[1] = clipnan(in[1]);
+      out[2] = clipnan(in[2]);
+    }
+  }
+
+  if(nearest_color == NULL) return;
+
+  const float f = levels - 1;
+  const float rf = 1.0 / f;
+  __m128 err;
+
+  // dither without error diffusion on very tiny images
+  if(width < 3 || height < 3)
+  {
+    for(int j = 0; j < height; j++)
+    {
+      float *out = ((float *)ovoid) + (size_t)ch * j * width;
+      for(int i = 0; i < width; i++) (void)nearest_color(out + ch * i, f, rf);
+    }
+
+    if(piece->pipe->mask_display & DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out->width, roi_out->height);
+    return;
+  }
+
+  // floyd-steinberg dithering follows here
+
+  // first height-1 rows
+  for(int j = 0; j < height - 1; j++)
+  {
+    float *out = ((float *)ovoid) + (size_t)ch * j * width;
+
+    // first column
+    err = nearest_color(out, f, rf);
+    _diffuse_error_sse(out + ch, err, 7.0f / 16.0f);
+    _diffuse_error_sse(out + ch * width, err, 5.0f / 16.0f);
+    _diffuse_error_sse(out + ch * (width + 1), err, 1.0f / 16.0f);
+
+
+    // main part of image
+    for(int i = 1; i < width - 1; i++)
+    {
+      err = nearest_color(out + ch * i, f, rf);
+      _diffuse_error_sse(out + ch * (i + 1), err, 7.0f / 16.0f);
+      _diffuse_error_sse(out + ch * (i - 1) + ch * width, err, 3.0f / 16.0f);
+      _diffuse_error_sse(out + ch * i + ch * width, err, 5.0f / 16.0f);
+      _diffuse_error_sse(out + ch * (i + 1) + ch * width, err, 1.0f / 16.0f);
+    }
+
+    // last column
+    err = nearest_color(out + ch * (width - 1), f, rf);
+    _diffuse_error_sse(out + ch * (width - 2) + ch * width, err, 3.0f / 16.0f);
+    _diffuse_error_sse(out + ch * (width - 1) + ch * width, err, 5.0f / 16.0f);
+  }
+
+  // last row
+  do
+  {
+    float *out = ((float *)ovoid) + (size_t)ch * (height - 1) * width;
+
+    // lower left pixel
+    err = nearest_color(out, f, rf);
+    _diffuse_error_sse(out + ch, err, 7.0f / 16.0f);
+
+    // main part of last row
+    for(int i = 1; i < width - 1; i++)
+    {
+      err = nearest_color(out + ch * i, f, rf);
+      _diffuse_error_sse(out + ch * (i + 1), err, 7.0f / 16.0f);
+    }
+
+    // lower right pixel
+    (void)nearest_color(out + ch * (width - 1), f, rf);
+
+  } while(0);
+
+  // copy alpha channel if needed
+  if(piece->pipe->mask_display & DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, roi_out->width, roi_out->height);
+}
+#endif
+
+
+static void encrypt_tea(unsigned int *arg)
+{
+  const unsigned int key[] = { 0xa341316c, 0xc8013ea4, 0xad90777d, 0x7e95761e };
   unsigned int v0 = arg[0], v1 = arg[1];
   unsigned int sum = 0;
   unsigned int delta = 0x9e3779b9;
@@ -357,15 +581,17 @@ void encrypt_tea(unsigned int *arg)
 }
 
 
-float tpdf(unsigned int urandom)
+static float tpdf(unsigned int urandom)
 {
   float frandom = (float)urandom / 0xFFFFFFFFu;
 
-  return (frandom < 0.5f ? (sqrtf(2.0f*frandom) - 1.0f) : (1.0f - sqrtf(2.0f*(1.0f - frandom))));
+  return (frandom < 0.5f ? (sqrtf(2.0f * frandom) - 1.0f) : (1.0f - sqrtf(2.0f * (1.0f - frandom))));
 }
 
 
-void process_random (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, void *ivoid, void *ovoid, const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out)
+static void process_random(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece,
+                           const void *const ivoid, void *const ovoid, const dt_iop_roi_t *const roi_in,
+                           const dt_iop_roi_t *const roi_out)
 {
   dt_iop_dither_data_t *data = (dt_iop_dither_data_t *)piece->data;
 
@@ -373,22 +599,21 @@ void process_random (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece
   const int height = roi_in->height;
   const int ch = piece->colors;
 
-  const float dither = powf(2.0f, data->random.damping/10.0f);
+  const float dither = powf(2.0f, data->random.damping / 10.0f);
 
-  unsigned int tea_states[2*dt_get_num_threads()];
-  memset(tea_states, 0, 2*dt_get_num_threads()*sizeof(unsigned int));
+  unsigned int *const tea_states = calloc(2 * dt_get_num_threads(), sizeof(unsigned int));
 
 #ifdef _OPENMP
-  #pragma omp parallel for default(none) shared(roi_out, ivoid, ovoid, tea_states) schedule(static)
+#pragma omp parallel for default(none) schedule(static)
 #endif
-  for(int j=0; j<height; j++)
+  for(int j = 0; j < height; j++)
   {
-    const int k = ch*width*j;
+    const size_t k = (size_t)ch * width * j;
     const float *in = (const float *)ivoid + k;
     float *out = (float *)ovoid + k;
     unsigned int *tea_state = tea_states + 2 * dt_get_thread_num();
     tea_state[0] = j * height + dt_get_thread_num();
-    for(int i=0; i<width; i++, in+=ch, out+=ch)
+    for(int i = 0; i < width; i++, in += ch, out += ch)
     {
       encrypt_tea(tea_state);
       float dith = dither * tpdf(tea_state[0]);
@@ -399,12 +624,14 @@ void process_random (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece
     }
   }
 
-  if(piece->pipe->mask_display)
-    dt_iop_alpha_copy(ivoid, ovoid, width, height);
+  free(tea_states);
+
+  if(piece->pipe->mask_display & DT_DEV_PIXELPIPE_DISPLAY_MASK) dt_iop_alpha_copy(ivoid, ovoid, width, height);
 }
 
 
-void process (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, void *ivoid, void *ovoid, const dt_iop_roi_t *roi_in, const dt_iop_roi_t *roi_out)
+void process(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,
+             void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
 {
   dt_iop_dither_data_t *data = (dt_iop_dither_data_t *)piece->data;
 
@@ -414,8 +641,20 @@ void process (struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, void 
     process_floyd_steinberg(self, piece, ivoid, ovoid, roi_in, roi_out);
 }
 
-static void
-method_callback (GtkWidget *widget, gpointer user_data)
+#if defined(__SSE2__)
+void process_sse2(struct dt_iop_module_t *self, dt_dev_pixelpipe_iop_t *piece, const void *const ivoid,
+                  void *const ovoid, const dt_iop_roi_t *const roi_in, const dt_iop_roi_t *const roi_out)
+{
+  dt_iop_dither_data_t *data = (dt_iop_dither_data_t *)piece->data;
+
+  if(data->dither_type == DITHER_RANDOM)
+    process_random(self, piece, ivoid, ovoid, roi_in, roi_out);
+  else
+    process_floyd_steinberg_sse2(self, piece, ivoid, ovoid, roi_in, roi_out);
+}
+#endif
+
+static void method_callback(GtkWidget *widget, gpointer user_data)
 {
   dt_iop_module_t *self = (dt_iop_module_t *)user_data;
   if(self->dt->gui->reset) return;
@@ -426,7 +665,7 @@ method_callback (GtkWidget *widget, gpointer user_data)
   if(p->dither_type == DITHER_RANDOM)
     gtk_widget_show(GTK_WIDGET(g->random));
   else
-    gtk_widget_hide(GTK_WIDGET(g->random));    
+    gtk_widget_hide(GTK_WIDGET(g->random));
 
   dt_dev_add_history_item(darktable.develop, self, TRUE);
 }
@@ -443,8 +682,7 @@ radius_callback (GtkWidget *slider, gpointer user_data)
 }
 #endif
 
-static void
-damping_callback (GtkWidget *slider, gpointer user_data)
+static void damping_callback(GtkWidget *slider, gpointer user_data)
 {
   dt_iop_module_t *self = (dt_iop_module_t *)user_data;
   if(self->dt->gui->reset) return;
@@ -468,27 +706,28 @@ range_callback (GtkWidget *slider, gpointer user_data)
 }
 #endif
 
-void commit_params (struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+void commit_params(struct dt_iop_module_t *self, dt_iop_params_t *p1, dt_dev_pixelpipe_t *pipe,
+                   dt_dev_pixelpipe_iop_t *piece)
 {
   dt_iop_dither_params_t *p = (dt_iop_dither_params_t *)p1;
   dt_iop_dither_data_t *d = (dt_iop_dither_data_t *)piece->data;
 
   d->dither_type = p->dither_type;
-  d->dither_center_view = dt_conf_get_bool("plugins/darkroom/dithering/dither_center_view");
   memcpy(&(d->random.range), &(p->random.range), sizeof(p->random.range));
   d->random.radius = p->random.radius;
   d->random.damping = p->random.damping;
 }
 
-void init_pipe (struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+void init_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
 {
   piece->data = malloc(sizeof(dt_iop_dither_data_t));
   self->commit_params(self, self->default_params, pipe, piece);
 }
 
-void cleanup_pipe (struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
+void cleanup_pipe(struct dt_iop_module_t *self, dt_dev_pixelpipe_t *pipe, dt_dev_pixelpipe_iop_t *piece)
 {
   free(piece->data);
+  piece->data = NULL;
 }
 
 
@@ -512,21 +751,19 @@ void gui_update(struct dt_iop_module_t *self)
   if(p->dither_type == DITHER_RANDOM)
     gtk_widget_show(GTK_WIDGET(g->random));
   else
-    gtk_widget_hide(GTK_WIDGET(g->random));    
+    gtk_widget_hide(GTK_WIDGET(g->random));
 }
 
 void init(dt_iop_module_t *module)
 {
-  module->params = malloc(sizeof(dt_iop_dither_params_t));
-  module->default_params = malloc(sizeof(dt_iop_dither_params_t));
+  module->params = calloc(1, sizeof(dt_iop_dither_params_t));
+  module->default_params = calloc(1, sizeof(dt_iop_dither_params_t));
   module->default_enabled = 0;
-  module->priority = 981; // module order created by iop_dependencies.py, do not edit!
+  module->priority = 985; // module order created by iop_dependencies.py, do not edit!
   module->params_size = sizeof(dt_iop_dither_params_t);
   module->gui_data = NULL;
-  dt_iop_dither_params_t tmp = (dt_iop_dither_params_t)
-  {
-    DITHER_FSAUTO, 0, { 0.0f, { 0.0f, 0.0f, 1.0f, 1.0f }, -200.0f }
-  };
+  dt_iop_dither_params_t tmp
+      = (dt_iop_dither_params_t){ DITHER_FSAUTO, 0, { 0.0f, { 0.0f, 0.0f, 1.0f, 1.0f }, -200.0f } };
   memcpy(module->params, &tmp, sizeof(dt_iop_dither_params_t));
   memcpy(module->default_params, &tmp, sizeof(dt_iop_dither_params_t));
 }
@@ -534,8 +771,6 @@ void init(dt_iop_module_t *module)
 
 void cleanup(dt_iop_module_t *module)
 {
-  free(module->gui_data);
-  module->gui_data = NULL;
   free(module->params);
   module->params = NULL;
 }
@@ -546,22 +781,23 @@ void gui_init(struct dt_iop_module_t *self)
   dt_iop_dither_gui_data_t *g = (dt_iop_dither_gui_data_t *)self->gui_data;
   dt_iop_dither_params_t *p = (dt_iop_dither_params_t *)self->params;
 
-  self->widget = gtk_vbox_new(FALSE, DT_BAUHAUS_SPACE);
-  g->random = gtk_vbox_new(FALSE, DT_BAUHAUS_SPACE);
+  self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+  dt_gui_add_help_link(self->widget, dt_get_help_url(self->op));
+  g->random = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
 
   g->dither_type = dt_bauhaus_combobox_new(self);
   dt_bauhaus_combobox_add(g->dither_type, _("random"));
-  dt_bauhaus_combobox_add(g->dither_type, _("floyd-steinberg 1-bit b&w"));
+  dt_bauhaus_combobox_add(g->dither_type, _("floyd-steinberg 1-bit B&W"));
   dt_bauhaus_combobox_add(g->dither_type, _("floyd-steinberg 4-bit gray"));
-  dt_bauhaus_combobox_add(g->dither_type, _("floyd-steinberg 8-bit rgb"));
-  dt_bauhaus_combobox_add(g->dither_type, _("floyd-steinberg 16-bit rgb"));
+  dt_bauhaus_combobox_add(g->dither_type, _("floyd-steinberg 8-bit RGB"));
+  dt_bauhaus_combobox_add(g->dither_type, _("floyd-steinberg 16-bit RGB"));
   dt_bauhaus_combobox_add(g->dither_type, _("floyd-steinberg auto"));
-  dt_bauhaus_widget_set_label(g->dither_type, _("method"));
+  dt_bauhaus_widget_set_label(g->dither_type, NULL, _("method"));
 
 #if 0
   g->radius = dt_bauhaus_slider_new_with_range(self, 0.0, 200.0, 0.1, p->random.radius, 2);
-  g_object_set (GTK_OBJECT(g->radius), "tooltip-text", _("radius for blurring step"), (char *)NULL);
-  dt_bauhaus_widget_set_label(g->radius,_("radius"));
+  gtk_widget_set_tooltip_text(g->radius, _("radius for blurring step"));
+  dt_bauhaus_widget_set_label(g->radius, NULL, _("radius"));
 
   g->range = dtgtk_gradient_slider_multivalue_new(4);
   dtgtk_gradient_slider_multivalue_set_marker(DTGTK_GRADIENT_SLIDER(g->range), GRADIENT_SLIDER_MARKER_LOWER_OPEN_BIG, 0);
@@ -572,17 +808,17 @@ void gui_init(struct dt_iop_module_t *self)
   dtgtk_gradient_slider_multivalue_set_value(DTGTK_GRADIENT_SLIDER(g->range), p->random.range[1], 1);
   dtgtk_gradient_slider_multivalue_set_value(DTGTK_GRADIENT_SLIDER(g->range), p->random.range[2], 2);
   dtgtk_gradient_slider_multivalue_set_value(DTGTK_GRADIENT_SLIDER(g->range), p->random.range[3], 3);
-  g_object_set (GTK_OBJECT(g->range), "tooltip-text", _("the gradient range where to apply random dither"), (char *)NULL);
+  gtk_widget_set_tooltip_text(g->range, _("the gradient range where to apply random dither"));
   g->range_label = gtk_label_new(_("gradient range"));
 
-  GtkWidget *rlabel = gtk_hbox_new(FALSE,0);
+  GtkWidget *rlabel = gtk_box_new(GTK_ORIENTATION_HORIZONTAL,0);
   gtk_box_pack_start(GTK_BOX(rlabel), GTK_WIDGET(g->range_label), FALSE, FALSE, 0);
 #endif
 
-  g->damping = dt_bauhaus_slider_new_with_range(self, -200.0, 0.0, 0.100, p->random.damping, 3);
-  g_object_set (GTK_OBJECT(g->damping), "tooltip-text", _("damping level of random dither"), (char *)NULL);
-  dt_bauhaus_widget_set_label(g->damping,_("damping"));
-  dt_bauhaus_slider_set_format(g->damping,"%.0fdB");
+  g->damping = dt_bauhaus_slider_new_with_range(self, -200.0, 0.0, 1.0, p->random.damping, 3);
+  gtk_widget_set_tooltip_text(g->damping, _("damping level of random dither"));
+  dt_bauhaus_widget_set_label(g->damping, NULL, _("damping"));
+  dt_bauhaus_slider_set_format(g->damping, "%.0fdB");
 
 #if 0
   gtk_box_pack_start(GTK_BOX(g->random), g->radius, TRUE, TRUE, 0);
@@ -594,16 +830,14 @@ void gui_init(struct dt_iop_module_t *self)
   gtk_box_pack_start(GTK_BOX(self->widget), g->dither_type, TRUE, TRUE, 0);
   gtk_box_pack_start(GTK_BOX(self->widget), g->random, TRUE, TRUE, 0);
 
-  g_signal_connect (G_OBJECT (g->dither_type), "value-changed",
-                    G_CALLBACK (method_callback), self);
+  g_signal_connect(G_OBJECT(g->dither_type), "value-changed", G_CALLBACK(method_callback), self);
 #if 0
   g_signal_connect (G_OBJECT (g->radius), "value-changed",
                     G_CALLBACK (radius_callback), self);
   g_signal_connect (G_OBJECT (g->range), "value-changed",
                     G_CALLBACK (range_callback), self);
 #endif
-  g_signal_connect (G_OBJECT (g->damping), "value-changed",
-                    G_CALLBACK (damping_callback), self);
+  g_signal_connect(G_OBJECT(g->damping), "value-changed", G_CALLBACK(damping_callback), self);
 }
 
 void gui_cleanup(struct dt_iop_module_t *self)
@@ -614,4 +848,4 @@ void gui_cleanup(struct dt_iop_module_t *self)
 
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
-// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;

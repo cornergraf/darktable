@@ -15,12 +15,12 @@
     You should have received a copy of the GNU General Public License
     along with darktable.  If not, see <http://www.gnu.org/licenses/>.
 */
-#ifndef DT_IMAGEIO_JPEG_H
-#define DT_IMAGEIO_JPEG_H
 
-#include <stdlib.h>
-#include <stdio.h>
+#pragma once
+
 #include <inttypes.h>
+#include <stdio.h>
+#include <stdlib.h>
 // this fixes a rather annoying, long time bug in libjpeg :(
 #undef HAVE_STDLIB_H
 #undef HAVE_STDDEF_H
@@ -28,6 +28,7 @@
 #undef HAVE_STDLIB_H
 #undef HAVE_STDDEF_H
 
+#include "common/colorspaces.h"
 #include "common/image.h"
 #include "common/mipmap_cache.h"
 
@@ -37,32 +38,38 @@ typedef struct dt_imageio_jpeg_t
   struct jpeg_source_mgr src;
   struct jpeg_destination_mgr dest;
   struct jpeg_decompress_struct dinfo;
-  struct jpeg_compress_struct   cinfo;
+  struct jpeg_compress_struct cinfo;
   FILE *f;
-}
-dt_imageio_jpeg_t;
+} dt_imageio_jpeg_t;
 
 /** reads the header and fills width/height in jpg struct. */
 int dt_imageio_jpeg_decompress_header(const void *in, size_t length, dt_imageio_jpeg_t *jpg);
 /** reads the whole image to the out buffer, which has to be large enough. */
 int dt_imageio_jpeg_decompress(dt_imageio_jpeg_t *jpg, uint8_t *out);
-/** compresses in to out buffer with given quality (0..100). out buffer must be large enough. returns actual data length. */
-int dt_imageio_jpeg_compress(const uint8_t *in, uint8_t *out, const int width, const int height, const int quality);
+/** compresses in to out buffer with given quality (0..100). out buffer must be large enough. returns actual
+ * data length. */
+int dt_imageio_jpeg_compress(const uint8_t *in, uint8_t *out, const int width, const int height,
+                             const int quality);
 
 /** write jpeg to file, with exif if not NULL. */
-int dt_imageio_jpeg_write(const char *filename, const uint8_t *in, const int width, const int height, const int quality, void *exif, int exif_len);
+int dt_imageio_jpeg_write(const char *filename, const uint8_t *in, const int width, const int height,
+                          const int quality, const void *exif, int exif_len);
 /** this will collect the images icc profile (or the global export override) and append it during write. */
-int dt_imageio_jpeg_write_with_icc_profile(const char *filename, const uint8_t *in, const int width, const int height, const int quality, void *exif, int exif_len, int imgid);
+int dt_imageio_jpeg_write_with_icc_profile(const char *filename, const uint8_t *in, const int width,
+                                           const int height, const int quality, const void *exif, int exif_len,
+                                           int imgid);
 /** read jpeg header from file, leave file descriptor open until jpeg_read is called. */
 int dt_imageio_jpeg_read_header(const char *filename, dt_imageio_jpeg_t *jpg);
 /** reads the jpeg to the (sufficiently allocated) buffer, closes file. */
 int dt_imageio_jpeg_read(dt_imageio_jpeg_t *jpg, uint8_t *out);
 /** reads the color profile attached to the jpeg, closes file. */
 int dt_imageio_jpeg_read_profile(dt_imageio_jpeg_t *jpg, uint8_t **out);
+/** return the color space of the image, this only distinguishs between sRGB, AdobeRGB and unknown. used for mipmaps */
+dt_colorspaces_color_profile_type_t dt_imageio_jpeg_read_color_space(dt_imageio_jpeg_t *jpg);
 
 /** utility function to read and open jpeg from imagio.c */
-dt_imageio_retval_t dt_imageio_open_jpeg(dt_image_t *img, const char *filename, dt_mipmap_cache_allocator_t a);
-#endif
+dt_imageio_retval_t dt_imageio_open_jpeg(dt_image_t *img, const char *filename, dt_mipmap_buffer_t *buf);
+
 // modelines: These editor modelines have been set for all relevant files by tools/update_modelines.sh
 // vim: shiftwidth=2 expandtab tabstop=2 cindent
-// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-space on;
+// kate: tab-indents: off; indent-width 2; replace-tabs on; indent-mode cstyle; remove-trailing-spaces modified;
